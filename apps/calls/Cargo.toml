@@ -14,6 +14,8 @@ denial-look-gpui = { path = "../../libraries/denial-look-gpui" }
 futures-lite = "2.6"
 libc = "0.2"
 zbus = "5.19"
+wayland-client = "0.31"
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 # The local gpui-touch checkout, as Messages builds against; see
 # apps/messages/Cargo.toml for what it carries beyond the pinned branch.
 gpui = { path = "../../../gpui-touch/crates/gpui" }

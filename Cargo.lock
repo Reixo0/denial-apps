@@ -683,6 +683,8 @@ dependencies = [
  "gpui",
  "gpui_platform",
  "libc",
+ "wayland-client",
+ "wayland-protocols-wlr",
  "zbus",
 ]
 

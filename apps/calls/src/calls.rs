@@ -31,7 +31,7 @@ use gpui::{
 };
 
 use crate::data::{self, Call, Direction};
-use crate::dmail::{CallAudio1Proxy, CallRow, NotificationsProxy, Voice1Proxy};
+use crate::dmail::{CallAudio1Proxy, CallRow, NotificationsProxy, Sensors1Proxy, Voice1Proxy};
 use crate::local::{CallLog, Favourites};
 use crate::people::People;
 
@@ -397,6 +397,9 @@ pub struct Calls {
     voice: Option<Voice1Proxy<'static>>,
     audio: Option<CallAudio1Proxy<'static>>,
     _follow_voice: Task<()>,
+    /// Something covers the screen: a cheek must not press the call's controls.
+    near: bool,
+    _follow_near: Task<()>,
     /// The id of the next call.
     next_id: u64,
     favourites: Favourites,
@@ -495,6 +498,10 @@ impl Calls {
             audio: None,
             _follow_voice: cx.spawn_in(window, async move |this, cx| {
                 Self::follow_voice(this, cx).await
+            }),
+            near: false,
+            _follow_near: cx.spawn_in(window, async move |this, cx| {
+                Self::follow_near(this, cx).await
             }),
             next_id,
             favourites: Favourites::load(),
@@ -644,6 +651,29 @@ impl Calls {
         while let Some(change) = changes.next().await {
             let rows = change.get().await.unwrap_or_default();
             let taken = this.update_in(cx, |view, window, cx| view.sync(rows, window, cx));
+            if taken.is_err() {
+                return;
+            }
+        }
+    }
+
+    /// Follows the proximity sensor, for as long as the window lives.
+    async fn follow_near(this: WeakEntity<Self>, cx: &mut AsyncWindowContext) {
+        let connected = async {
+            let bus = zbus::Connection::system().await?;
+            Sensors1Proxy::new(&bus).await
+        };
+        let sensors = match connected.await {
+            Ok(sensors) => sensors,
+            Err(error) => return eprintln!("calls: reaching steinerd: {error}"),
+        };
+        let mut changes = sensors.receive_near_changed().await;
+        while let Some(change) = changes.next().await {
+            let near = change.get().await.unwrap_or(false);
+            let taken = this.update(cx, |view, cx| {
+                view.near = near;
+                cx.notify();
+            });
             if taken.is_err() {
                 return;
             }

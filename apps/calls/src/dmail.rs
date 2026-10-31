@@ -42,6 +42,17 @@ pub trait CallAudio1 {
     fn set_speaker(&self, speaker: bool) -> zbus::Result<()>;
 }
 
+/// steinerd's proximity sensor; calls-ringer holds it during a call.
+#[proxy(
+    interface = "org.steinerd.Sensors1",
+    default_service = "org.steinerd",
+    default_path = "/org/steinerd"
+)]
+pub trait Sensors1 {
+    #[zbus(property)]
+    fn near(&self) -> zbus::Result<bool>;
+}
+
 #[proxy(
     interface = "org.freedesktop.Notifications",
     default_service = "org.freedesktop.Notifications",
