@@ -1,5 +1,7 @@
-//! Rings while a call comes in and opens Calls on it; dmail itself never
-//! rings. Turns the screen off while a call on the earpiece is held to the ear.
+//! Rings while a call comes in, wakes the screen and opens Calls on it; dmail
+//! itself never rings. Turns the screen off while a call on the earpiece is held
+//! to the ear. While the session is locked, posts the call as a notification
+//! whose actions the lock screen offers without the PIN.
 //! Sleeps on D-Bus, needs no window, and is started at login by
 //! calls-ringer.service. callaudio leaves the sound card on its normal profile
 //! while a call rings here, so the ringtone plays.
@@ -17,6 +19,9 @@ use wayland_protocols_wlr::output_power_management::v1::client::{
     zwlr_output_power_manager_v1::ZwlrOutputPowerManagerV1,
     zwlr_output_power_v1::{Mode, ZwlrOutputPowerV1},
 };
+use denial_contacts::Contacts;
+use std::collections::HashMap;
+use zbus::zvariant::{OwnedObjectPath, Value};
 use zbus::{Connection, proxy};
 
 const RINGTONE: &str = "/usr/share/sounds/freedesktop/stereo/phone-incoming-call.oga";
@@ -28,7 +33,66 @@ const RINGTONE: &str = "/usr/share/sounds/freedesktop/stereo/phone-incoming-call
 )]
 trait Voice1 {
     #[zbus(property)]
-    fn calls(&self) -> zbus::Result<Vec<(u8, String, String, String, i64)>>;
+    fn calls(&self) -> zbus::Result<Vec<Call>>;
+
+    fn answer(&self, id: u8) -> zbus::Result<()>;
+
+    fn hangup(&self, id: u8) -> zbus::Result<()>;
+}
+
+/// Id, number, direction, state, connected time.
+type Call = (u8, String, String, String, i64);
+
+#[proxy(
+    interface = "org.denialwm.Calls1",
+    default_service = "org.denialwm.Calls",
+    default_path = "/org/denialwm/Calls"
+)]
+trait App {
+    fn decline(&self) -> zbus::Result<()>;
+}
+
+#[proxy(
+    interface = "org.freedesktop.login1.Manager",
+    default_service = "org.freedesktop.login1",
+    default_path = "/org/freedesktop/login1"
+)]
+trait Logind {
+    fn list_sessions(&self) -> zbus::Result<Vec<(String, u32, String, String, OwnedObjectPath)>>;
+}
+
+#[proxy(
+    interface = "org.freedesktop.login1.Session",
+    default_service = "org.freedesktop.login1"
+)]
+trait Session {
+    #[zbus(property)]
+    fn locked_hint(&self) -> zbus::Result<bool>;
+}
+
+#[proxy(
+    interface = "org.freedesktop.Notifications",
+    default_service = "org.freedesktop.Notifications",
+    default_path = "/org/freedesktop/Notifications"
+)]
+trait Notifications {
+    #[allow(clippy::too_many_arguments)]
+    fn notify(
+        &self,
+        app_name: &str,
+        replaces_id: u32,
+        app_icon: &str,
+        summary: &str,
+        body: &str,
+        actions: &[&str],
+        hints: HashMap<&str, Value<'_>>,
+        expire_timeout: i32,
+    ) -> zbus::Result<u32>;
+
+    fn close_notification(&self, id: u32) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    fn action_invoked(&self, id: u32, action_key: String) -> zbus::Result<()>;
 }
 
 #[proxy(
@@ -51,6 +115,9 @@ trait Sensors1 {
 trait CallAudio1 {
     #[zbus(property)]
     fn speaker(&self) -> zbus::Result<bool>;
+
+    #[zbus(property)]
+    fn set_speaker(&self, speaker: bool) -> zbus::Result<()>;
 }
 
 fn main() -> ExitCode {
@@ -64,9 +131,11 @@ fn main() -> ExitCode {
 }
 
 enum Event {
-    Calls(Vec<(u8, String, String, String, i64)>),
+    Calls(Vec<Call>),
     Near(bool),
     Speaker(bool),
+    Locked(bool),
+    Action(u32, String),
     Closed,
 }
 
@@ -74,7 +143,22 @@ async fn run() -> zbus::Result<()> {
     let system = Connection::system().await?;
     let voice = Voice1Proxy::new(&system).await?;
     let sensors = Sensors1Proxy::new(&system).await?;
-    let audio = CallAudio1Proxy::new(&Connection::session().await?).await?;
+    let session = Connection::session().await?;
+    let audio = CallAudio1Proxy::new(&session).await?;
+    let app = AppProxy::new(&session).await?;
+    let notifications = NotificationsProxy::new(&session).await?;
+    let mut actions = notifications.receive_action_invoked().await?;
+    let seat_session = seat_session(&system).await;
+    let mut locked_changes = match &seat_session {
+        Some(session) => Some(session.receive_locked_hint_changed().await),
+        None => None,
+    };
+    let mut locked = match &seat_session {
+        Some(session) => session.locked_hint().await.unwrap_or(false),
+        None => false,
+    };
+    let mut posted: Option<(u32, CallCard)> = None;
+    let mut list_now: Vec<Call> = Vec::new();
     let mut calls = voice.receive_calls_changed().await;
     let mut near_changes = sensors.receive_near_changed().await;
     let mut speaker_changes = audio.receive_speaker_changed().await;
@@ -88,7 +172,13 @@ async fn run() -> zbus::Result<()> {
                 let talking = list
                     .iter()
                     .any(|call| matches!(call.3.as_str(), "dialing" | "alerting" | "active" | "held"));
-                follow(list, &mut ringing);
+                let rang = ringing.is_some();
+                follow(list.clone(), &mut ringing);
+                // Wakes a dark screen; a ringing call is never held to an ear.
+                if ringing.is_some() && !rang && !dark {
+                    set_screen(&mut screen, true);
+                }
+                list_now = list;
                 if talking != in_call {
                     in_call = talking;
                     // Only a report from this call counts as near.
@@ -106,24 +196,39 @@ async fn run() -> zbus::Result<()> {
             }
             Event::Near(value) => near = value,
             Event::Speaker(value) => speaker = value,
+            Event::Locked(value) => {
+                eprintln!("calls-ringer: locked {value}");
+                locked = value;
+            }
+            Event::Action(id, key) => {
+                if posted.as_ref().is_some_and(|(posted, _)| *posted == id) {
+                    let call = posted.as_ref().map_or(0, |(_, card)| card.call);
+                    let done = match key.as_str() {
+                        "answer" => voice.answer(call).await,
+                        "decline" => match app.decline().await {
+                            Ok(()) => Ok(()),
+                            Err(_) => voice.hangup(call).await,
+                        },
+                        "end" => voice.hangup(call).await,
+                        "speaker" => audio.set_speaker(!speaker).await,
+                        _ => Ok(()),
+                    };
+                    if let Err(error) = done {
+                        eprintln!("calls-ringer: {key}: {error}");
+                    }
+                }
+            }
             Event::Closed => return Ok(()),
         }
         let want_dark = in_call && near && !speaker;
         if want_dark != dark {
             dark = want_dark;
             eprintln!("calls-ringer: screen {}", if dark { "off" } else { "on" });
-            // A compositor that restarted needs a new connection.
-            let set = match screen.as_mut().map(|screen| screen.set(!dark)) {
-                Some(Ok(())) => Ok(()),
-                _ => Screen::connect().and_then(|mut new| {
-                    new.set(!dark)?;
-                    screen = Some(new);
-                    Ok(())
-                }),
-            };
-            if let Err(error) = set {
-                eprintln!("calls-ringer: screen: {error}");
-            }
+            set_screen(&mut screen, !dark);
+        }
+        let card = if locked { CallCard::of(&list_now, speaker) } else { None };
+        if card.as_ref() != posted.as_ref().map(|(_, card)| card) {
+            posted = show_card(&notifications, posted.take(), card).await;
         }
         event = future::or(
             async {
@@ -133,7 +238,27 @@ async fn run() -> zbus::Result<()> {
                 }
             },
             future::or(
-                async {
+                future::or(
+                    async {
+                        match actions.next().await {
+                            Some(signal) => match signal.args() {
+                                Ok(args) => Event::Action(*args.id(), args.action_key().clone()),
+                                Err(_) => future::pending().await,
+                            },
+                            None => future::pending().await,
+                        }
+                    },
+                    async {
+                        match locked_changes.as_mut() {
+                            Some(changes) => match changes.next().await {
+                                Some(change) => Event::Locked(change.get().await.unwrap_or(false)),
+                                None => future::pending().await,
+                            },
+                            None => future::pending().await,
+                        }
+                    },
+                ),
+                future::or(async {
                     match near_changes.next().await {
                         Some(change) => Event::Near(change.get().await.unwrap_or(false)),
                         None => future::pending().await,
@@ -144,10 +269,118 @@ async fn run() -> zbus::Result<()> {
                         Some(change) => Event::Speaker(change.get().await.unwrap_or(false)),
                         None => future::pending().await,
                     }
-                },
+                }),
             ),
         )
         .await;
+    }
+}
+
+/// The session on the phone's seat, whose lock state deniald keeps in logind.
+async fn seat_session(system: &Connection) -> Option<SessionProxy<'static>> {
+    let uid = unsafe { libc::getuid() };
+    let sessions = LogindProxy::new(system).await.ok()?.list_sessions().await.ok()?;
+    let (.., path) = sessions
+        .into_iter()
+        .find(|(_, session_uid, _, seat, _)| *session_uid == uid && seat == "seat0")?;
+    SessionProxy::builder(system).path(path).ok()?.build().await.ok()
+}
+
+/// What the lock screen shows of a call.
+#[derive(PartialEq)]
+struct CallCard {
+    call: u8,
+    number: String,
+    ringing: bool,
+    speaker: bool,
+}
+
+impl CallCard {
+    fn of(calls: &[Call], speaker: bool) -> Option<Self> {
+        let ringing = calls.iter().find(|call| call.3 == "incoming");
+        let call = ringing.or_else(|| {
+            calls
+                .iter()
+                .find(|call| matches!(call.3.as_str(), "dialing" | "alerting" | "active" | "held"))
+        })?;
+        Some(Self {
+            call: call.0,
+            number: call.1.clone(),
+            ringing: ringing.is_some(),
+            speaker,
+        })
+    }
+
+    fn name(&self) -> String {
+        if self.number.is_empty() {
+            return "No caller ID".into();
+        }
+        // Read afresh: calls are rare and the folder can change.
+        let contacts = Contacts::folder().map(|folder| Contacts::load(&folder));
+        contacts
+            .as_ref()
+            .and_then(|contacts| Some(contacts.all()[contacts.find(&self.number)?].name.clone()))
+            .unwrap_or_else(|| self.number.clone())
+    }
+}
+
+/// Posts the card in place of the last one, or takes the last one away.
+async fn show_card(
+    notifications: &NotificationsProxy<'_>,
+    posted: Option<(u32, CallCard)>,
+    card: Option<CallCard>,
+) -> Option<(u32, CallCard)> {
+    let replaces = posted.as_ref().map_or(0, |(id, _)| *id);
+    let Some(card) = card else {
+        if replaces != 0
+            && let Err(error) = notifications.close_notification(replaces).await
+        {
+            eprintln!("calls-ringer: closing the call's notification: {error}");
+        }
+        return None;
+    };
+    let (category, body, actions): (_, _, &[&str]) = if card.ringing {
+        ("call.incoming", "Incoming call", &["decline", "Decline", "answer", "Answer"])
+    } else if card.speaker {
+        ("call.ongoing", "In a call", &["speaker", "Earpiece", "end", "End"])
+    } else {
+        ("call.ongoing", "In a call", &["speaker", "Speaker", "end", "End"])
+    };
+    let hints = HashMap::from([
+        ("category", Value::from(category)),
+        ("desktop-entry", Value::from("org.denialwm.Calls")),
+        ("urgency", Value::from(2u8)),
+        ("resident", Value::from(true)),
+        ("suppress-sound", Value::from(true)),
+        ("x-denial-clearable", Value::from(false)),
+    ]);
+    match notifications
+        .notify("Calls", replaces, "call-start", &card.name(), body, actions, hints, 0)
+        .await
+    {
+        Ok(id) => {
+            eprintln!("calls-ringer: posted {category} as {id}");
+            Some((id, card))
+        }
+        Err(error) => {
+            eprintln!("calls-ringer: posting the call: {error}");
+            None
+        }
+    }
+}
+
+/// A compositor that restarted needs a new connection.
+fn set_screen(screen: &mut Option<Screen>, on: bool) {
+    let set = match screen.as_mut().map(|screen| screen.set(on)) {
+        Some(Ok(())) => Ok(()),
+        _ => Screen::connect().and_then(|mut new| {
+            new.set(on)?;
+            *screen = Some(new);
+            Ok(())
+        }),
+    };
+    if let Err(error) = set {
+        eprintln!("calls-ringer: screen: {error}");
     }
 }
 
@@ -218,7 +451,7 @@ impl Screen {
 }
 
 /// Starts ringing when a call comes in, and stops when none is left ringing.
-fn follow(calls: Vec<(u8, String, String, String, i64)>, ringing: &mut Option<Arc<AtomicBool>>) {
+fn follow(calls: Vec<Call>, ringing: &mut Option<Arc<AtomicBool>>) {
     let rings = calls.iter().any(|call| call.3 == "incoming");
     match (rings, ringing.is_some()) {
         (true, false) => {

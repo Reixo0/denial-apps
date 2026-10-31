@@ -784,6 +784,8 @@ impl Calls {
         let id = self.take_id();
         // Opened first: the screen it leaves had no call going on behind it.
         self.open(Screen::Call, window, cx);
+        // steinerd keeps the last value while the sensor is stopped.
+        self.near = false;
         self.live = Some(Live {
             id,
             modem,
@@ -852,6 +854,13 @@ impl Calls {
             }
         })
         .detach();
+    }
+
+    /// Turns down the call ringing here.
+    pub fn decline(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.live.as_ref().is_some_and(Live::ringing_here) {
+            self.hang_up(window, cx);
+        }
     }
 
     /// Asks dmail to end the call, or turn down the one ringing here; `sync`

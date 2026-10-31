@@ -75,8 +75,10 @@ impl Calls {
     /// else the controls, or the in-call keypad, over End.
     pub(super) fn call_controls(&self, layer: Layer, cx: &mut Context<Self>) -> Option<AnyElement> {
         let live = self.live.as_ref()?;
-        // A call on the speakers is not held to a face.
-        let active = layer.live() && !live.ended() && (!self.near || live.speaker);
+        // A call on the speakers is not held to a face, and one ringing here
+        // must always answer.
+        let covered = self.near && !live.speaker && !live.ringing_here();
+        let active = layer.live() && !live.ended() && !covered;
         if live.ringing_here() {
             return Some(
                 div()

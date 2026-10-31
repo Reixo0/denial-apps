@@ -15,7 +15,7 @@ use gpui_platform::application;
 use zbus::fdo::RequestNameFlags;
 
 use crate::calls::{Back, Calls};
-use crate::instance::{InstanceProxy, Open, Opener};
+use crate::instance::{InstanceProxy, Opener, Request};
 
 fn main() {
     denial_look::words::register_chinese(words::CHINESE);
@@ -66,7 +66,18 @@ fn main() {
                 .unwrap();
             cx.spawn(async move |cx| {
                 let _bus = bus;
-                while let Ok((number, token)) = opens.recv().await {
+                while let Ok(request) = opens.recv().await {
+                    let (number, token) = match request {
+                        Request::Open(open) => open,
+                        Request::Decline => {
+                            let declined =
+                                window.update(cx, |view, window, cx| view.decline(window, cx));
+                            if declined.is_err() {
+                                return;
+                            }
+                            continue;
+                        }
+                    };
                     let shown = window.update(cx, |view, window, cx| {
                         if !number.is_empty() {
                             view.show_number(number, window, cx);
@@ -90,7 +101,7 @@ fn main() {
 
 /// Serves `Opener` and takes Calls' bus name, or fails with NameTaken while
 /// another Calls runs.
-async fn claim(opener: async_channel::Sender<Open>) -> zbus::Result<zbus::Connection> {
+async fn claim(opener: async_channel::Sender<Request>) -> zbus::Result<zbus::Connection> {
     let bus = zbus::connection::Builder::session()?
         .serve_at(instance::PATH, Opener(opener))?
         .build()

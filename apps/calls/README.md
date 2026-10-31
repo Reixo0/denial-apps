@@ -5,7 +5,10 @@ dmail's `org.dmail.Voice1`: the app places, answers and ends them there and
 follows its `Calls`. Mute is callaudio's. `calls-ringer`, a small user service
 (`packaging/calls-ringer.service`), plays the ringtone with `pw-play` while a
 call comes in and opens the app on it, and turns the screen off while a call on
-the earpiece is near a face (steinerd's proximity sensor, wlr output power). The
+the earpiece is near a face (steinerd's proximity sensor, wlr output power). While
+the session is locked it also posts the call as a notification, category
+`call.incoming` or `call.ongoing`, whose actions Denial's lock screen offers
+without the PIN. The
 call screen's controls ignore touch while near; the app tells of missed calls. Speaker
 moves a call from the earpiece through callaudio, and Hold is off, as dmail has
 no request for it. A second call waits unseen until the first
