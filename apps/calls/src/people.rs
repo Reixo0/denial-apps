@@ -1,5 +1,4 @@
-//! The contacts: the folder's, and the samples while they are shown, with
-//! their photos ready to draw.
+//! The folder's contacts, with their photos ready to draw.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -15,13 +14,9 @@ pub struct People {
 }
 
 impl People {
-    /// The contacts in `folder`, with the samples added when `samples` is on.
-    pub fn read(folder: Option<&Path>, samples: bool) -> Self {
-        let mut contacts = folder.map(Contacts::load).unwrap_or_default();
-        if samples {
-            contacts.extend(crate::samples::contacts());
-        }
-        Self::new(contacts)
+    /// The contacts in `folder`.
+    pub fn read(folder: Option<&Path>) -> Self {
+        Self::new(folder.map(Contacts::load).unwrap_or_default())
     }
 
     fn new(contacts: Contacts) -> Self {

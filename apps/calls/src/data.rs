@@ -34,8 +34,6 @@ pub struct Call {
     pub time: i64,
     /// Seconds talked; 0 for one that was never answered.
     pub talked: u64,
-    /// One of the made-up calls of `samples`.
-    pub sample: bool,
 }
 
 impl Call {

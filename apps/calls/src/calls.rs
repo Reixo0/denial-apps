@@ -1,6 +1,6 @@
 //! The Calls window: its state, what each action does, and how its screens
-//! are stacked and animated. Calls are mocked for now: nothing is dialled,
-//! and a call runs only on screen (`Live`). The screens are drawn in the
+//! are stacked and animated. The modem's calls come from dmail (`dmail`); the
+//! one on screen is `Live`, moved on by what dmail reports. The screens are drawn in the
 //! modules below, all to Denial's mobile materials (Islands,
 //! denial/docs/MOBILE_APP_MATERIALS.md), as Messages draws its own.
 
@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use denial_contacts::{Contacts, Watch, dialable, same_number};
+use futures_lite::StreamExt;
 use denial_look::mobile::{
     GESTURE_INSET, GROUP_HEIGHT, KEYBOARD_GAP, ScrollAway, TAB_BAR, content_bottom, dp as dp_lp,
 };
@@ -30,9 +31,9 @@ use gpui::{
 };
 
 use crate::data::{self, Call, Direction};
-use crate::local::{Favourites, Flag};
+use crate::dmail::{CallAudio1Proxy, CallRow, NotificationsProxy, Voice1Proxy};
+use crate::local::{CallLog, Favourites};
 use crate::people::People;
-use crate::samples;
 
 actions!(calls, [Back]);
 
@@ -40,10 +41,8 @@ actions!(calls, [Back]);
 const STAGGERED: usize = 12;
 /// Emoji the UI font lacks are drawn from this font first, as in Messages.
 const EMOJI_FONT: &str = "Noto Color Emoji";
-/// A mock call placed here is answered this long after it starts ringing.
-const ANSWER_AFTER: Duration = Duration::from_millis(2500);
-/// A mock call coming in rings this long, then is missed.
-const RING_FOR: Duration = Duration::from_secs(30);
+/// The id of the first call in the log.
+const FIRST_ID: u64 = 1;
 /// A call that ended stays on screen this long.
 const ENDED_FOR: Duration = Duration::from_millis(1200);
 /// Recent calls shown on a contact.
@@ -110,8 +109,6 @@ enum Confirm {
 enum Overlay {
     /// Lifted, with its actions under it.
     Held(Held),
-    /// The menu, under the top group.
-    Menu,
     Confirm(Confirm),
 }
 
@@ -308,17 +305,21 @@ enum Phase {
     Ended(Instant, u64),
 }
 
-/// The call on screen. Mocked: placing one only rings on screen, and the
-/// other side answers after `ANSWER_AFTER`.
+/// The call on screen.
 struct Live {
     id: u64,
+    /// dmail's id for it; none until a call placed here has one.
+    modem: Option<u8>,
+    /// End was pressed before the call had its id.
+    end_when_known: bool,
+    /// Decline was pressed: it ended as turned down, not missed.
+    turned_down: bool,
     number: String,
     incoming: bool,
     phase: Phase,
     /// Unix time it started ringing.
     time: i64,
     muted: bool,
-    speaker: bool,
     held: bool,
     /// The in-call keypad shows in place of the controls.
     keypad: bool,
@@ -350,8 +351,8 @@ impl Live {
     /// missed, its clock turns a second, or its end has shown long enough.
     fn wake(&self, now: Instant) -> Duration {
         let at = match self.phase {
-            Phase::Ringing(since) if self.incoming => since + RING_FOR,
-            Phase::Ringing(since) => since + ANSWER_AFTER,
+            // Moved on by dmail, not by time.
+            Phase::Ringing(_) => now + Duration::from_secs(1),
             Phase::Connected(since) => {
                 let into = now.saturating_duration_since(since);
                 now + Duration::from_secs(1) - Duration::from_nanos(into.subsec_nanos().into())
@@ -385,19 +386,22 @@ pub struct Calls {
     /// The user's font, with colour emoji first among its fallbacks.
     font: Font,
     focus_handle: FocusHandle,
-    /// The contacts folder, and what is in it with the samples.
+    /// The contacts folder, and what is in it.
     folder: Option<PathBuf>,
     people: People,
     /// The call log, newest first.
     log: Vec<Call>,
+    /// The real calls of `log`, on the phone.
+    saved: CallLog,
+    voice: Option<Voice1Proxy<'static>>,
+    audio: Option<CallAudio1Proxy<'static>>,
+    _follow_voice: Task<()>,
     /// The id of the next call.
     next_id: u64,
     favourites: Favourites,
-    /// The sample contacts and calls are hidden.
-    samples_hidden: Flag,
     /// The search bar's field, at the top of Recents and Contacts.
     search: Entity<TextInput>,
-    /// The search bar and the menu button leave as Recents or Contacts
+    /// The search bar leaves as Recents or Contacts
     /// scroll on, and come back as they scroll back.
     top_away: ScrollAway,
     /// The number on the keypad.
@@ -449,15 +453,11 @@ impl Calls {
                 this.keyboard_moved(window.keyboard_inset(), window, cx)
             }));
         }
-        let samples_hidden = Flag::load("samples-hidden");
-        let shown = !samples_hidden.on();
         let folder = Contacts::folder();
-        let people = People::read(folder.as_deref(), shown);
-        let log = if shown {
-            samples::calls(data::now())
-        } else {
-            Vec::new()
-        };
+        let people = People::read(folder.as_deref());
+        let saved = CallLog::new();
+        let log = saved.load(FIRST_ID);
+        let next_id = FIRST_ID + log.len() as u64;
         let (screen, typed) = match number {
             Some(number) => (Screen::Keypad, keypad::keyable(&number)),
             None => (Screen::Recents, String::new()),
@@ -489,9 +489,14 @@ impl Calls {
             folder,
             people,
             log,
-            next_id: samples::FIRST_LIVE_ID,
-            favourites: Favourites::load(samples::FAVOURITES),
-            samples_hidden,
+            saved,
+            voice: None,
+            audio: None,
+            _follow_voice: cx.spawn_in(window, async move |this, cx| {
+                Self::follow_voice(this, cx).await
+            }),
+            next_id,
+            favourites: Favourites::load(),
             search,
             top_away: ScrollAway::default(),
             typed,
@@ -562,24 +567,13 @@ impl Calls {
         }
     }
 
-    /// Reads the contacts again, with or without the samples.
+    /// Reads the contacts again.
     fn reread_people(&mut self, cx: &mut Context<Self>) {
-        self.people = People::read(self.folder.as_deref(), !self.samples_hidden.on());
+        self.people = People::read(self.folder.as_deref());
         for list in [&self.recents, &self.contacts, &self.found] {
             list.reset(0);
         }
         cx.notify();
-    }
-
-    /// Shows the sample contacts and calls, or takes them away.
-    fn show_samples(&mut self, shown: bool, cx: &mut Context<Self>) {
-        self.samples_hidden.set(!shown);
-        self.log.retain(|call| !call.sample);
-        if shown {
-            self.log.extend(samples::calls(data::now()));
-            self.log.sort_by_key(|call| std::cmp::Reverse(call.time));
-        }
-        self.reread_people(cx);
     }
 
     /// The calls with `who`, newest first.
@@ -625,6 +619,86 @@ impl Calls {
         self.next_id
     }
 
+    /// Follows dmail's calls for as long as the window lives.
+    async fn follow_voice(this: WeakEntity<Self>, cx: &mut AsyncWindowContext) {
+        let connected = async {
+            let voice = Voice1Proxy::new(&zbus::Connection::system().await?).await?;
+            let audio = CallAudio1Proxy::new(&zbus::Connection::session().await?).await?;
+            zbus::Result::Ok((voice, audio))
+        };
+        let (voice, audio) = match connected.await {
+            Ok(proxies) => proxies,
+            Err(error) => return eprintln!("calls: reaching dmail: {error}"),
+        };
+        let mut changes = voice.receive_calls_changed().await;
+        let first = voice.calls().await.unwrap_or_default();
+        let taken = this.update_in(cx, |view, window, cx| {
+            view.voice = Some(voice);
+            view.audio = Some(audio);
+            view.sync(first, window, cx);
+        });
+        if taken.is_err() {
+            return;
+        }
+        while let Some(change) = changes.next().await {
+            let rows = change.get().await.unwrap_or_default();
+            let taken = this.update_in(cx, |view, window, cx| view.sync(rows, window, cx));
+            if taken.is_err() {
+                return;
+            }
+        }
+    }
+
+    /// Takes dmail's list of calls: shows a call that started, moves the one
+    /// on screen on, and ends it when it left the list. One call at a time: a
+    /// second one waits unseen until the first is over.
+    fn sync(&mut self, rows: Vec<CallRow>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(live) = self.live.as_mut().filter(|live| !live.ended()) else {
+            let Some(row) = rows.iter().find(|row| row.3 != "ending") else {
+                return;
+            };
+            let number = if row.1.is_empty() {
+                tr("No caller ID").to_owned()
+            } else {
+                row.1.clone()
+            };
+            self.ring(number, row.2 == "in", Some(row.0), window, cx);
+            return self.sync(rows, window, cx);
+        };
+        // A call placed here can show in the list before Dial answers.
+        let known = live.modem.or_else(|| {
+            rows.iter()
+                .find(|row| row.2 == "out")
+                .map(|row| row.0)
+        });
+        let Some(id) = known else {
+            return;
+        };
+        live.modem = Some(id);
+        let Some(row) = rows.iter().find(|row| row.0 == id) else {
+            let direction = match (live.incoming, live.phase, live.turned_down) {
+                (false, ..) => Direction::Outgoing,
+                (true, Phase::Connected(_), _) => Direction::Incoming,
+                (true, _, true) => Direction::Declined,
+                (true, _, false) => Direction::Missed,
+            };
+            return self.finish(direction, cx);
+        };
+        live.held = row.3 == "held";
+        if matches!(row.3.as_str(), "active" | "held")
+            && !matches!(live.phase, Phase::Connected(_))
+        {
+            let ago = (data::now() - row.4).max(0) as u64;
+            let since = if row.4 == 0 { 0 } else { ago };
+            live.phase = Phase::Connected(Instant::now() - Duration::from_secs(since));
+        }
+        if live.end_when_known {
+            live.end_when_known = false;
+            self.hang_up(window, cx);
+        }
+        cx.notify();
+    }
+
     /// Places a call to `number`. One call at a time: while one runs, its
     /// screen shows instead.
     fn dial(&mut self, number: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -634,25 +708,37 @@ impl Calls {
         let Some(number) = dialable(&number).map(|_| number) else {
             return self.note(tr("Not a phone number"), cx);
         };
+        let Some(voice) = self.voice.clone() else {
+            return self.note(tr("The modem is not available"), cx);
+        };
         self.overlay = None;
         self.last_dialled = Some(number.clone());
-        self.ring(number, false, window, cx);
-    }
-
-    /// A made-up call comes in, from a favourite or a number no one has.
-    fn simulate_incoming(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.overlay = None;
-        if self.live.as_ref().is_some_and(|live| !live.ended()) {
-            return self.note(tr("Already in a call"), cx);
-        }
-        let mut numbers: Vec<String> = (0..self.people.all().len())
-            .filter(|&index| self.favourites.contains(self.people.key(index)))
-            .filter_map(|index| self.people.all()[index].phones.first())
-            .map(|phone| phone.number.clone())
+        // dmail takes digits, +, * and #; contacts may space them out.
+        let plain: String = number
+            .chars()
+            .filter(|c| c.is_ascii_digit() || "+*#".contains(*c))
             .collect();
-        numbers.push("+44 7700 900975".into());
-        let number = numbers[self.next_id as usize % numbers.len()].clone();
-        self.ring(number, true, window, cx);
+        self.ring(number, false, None, window, cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let placed = voice.dial(&plain).await;
+            let _ = this.update_in(cx, |view, window, cx| match placed {
+                Ok(id) => {
+                    if let Some(live) = view.live.as_mut().filter(|live| live.modem.is_none()) {
+                        live.modem = Some(id);
+                        if live.end_when_known {
+                            live.end_when_known = false;
+                            view.hang_up(window, cx);
+                        }
+                    }
+                }
+                Err(error) => {
+                    eprintln!("calls: dialling: {error}");
+                    view.note(tr("The call could not be placed"), cx);
+                    view.finish(Direction::Outgoing, cx);
+                }
+            });
+        })
+        .detach();
     }
 
     /// Starts a call with `number` ringing, and shows it.
@@ -660,6 +746,7 @@ impl Calls {
         &mut self,
         number: String,
         incoming: bool,
+        modem: Option<u8>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -668,12 +755,14 @@ impl Calls {
         self.open(Screen::Call, window, cx);
         self.live = Some(Live {
             id,
+            modem,
+            end_when_known: false,
+            turned_down: false,
             number,
             incoming,
             phase: Phase::Ringing(Instant::now()),
             time: data::now(),
             muted: false,
-            speaker: false,
             held: false,
             keypad: false,
             tones: String::new(),
@@ -706,12 +795,6 @@ impl Calls {
         let now = Instant::now();
         let live = self.live.as_mut().filter(|live| live.id == id)?;
         match live.phase {
-            Phase::Ringing(since) if !live.incoming && now >= since + ANSWER_AFTER => {
-                live.phase = Phase::Connected(now);
-            }
-            Phase::Ringing(since) if live.incoming && now >= since + RING_FOR => {
-                self.finish(Direction::Missed, cx);
-            }
             Phase::Ended(at, _) if now >= at + ENDED_FOR => {
                 self.close_call(window, cx);
                 return None;
@@ -722,36 +805,88 @@ impl Calls {
         self.live.as_ref().map(|live| live.wake(now))
     }
 
-    /// Answers the call ringing here.
+    /// Asks dmail to answer the call ringing here; `sync` shows the result.
     fn answer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let clock = self
-            .live
-            .as_ref()
-            .map(|live| self.clock(live.id, window, cx));
-        if let (Some(live), Some(clock)) = (self.live.as_mut(), clock)
-            && live.ringing_here()
-        {
-            live.phase = Phase::Connected(Instant::now());
-            live._clock = clock;
-            cx.notify();
-        }
-    }
-
-    /// Ends the call, or turns down the one ringing here.
-    fn hang_up(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(live) = &self.live else {
+        let Some(id) = self.live.as_ref().filter(|l| l.ringing_here()).and_then(|l| l.modem) else {
             return;
         };
-        let direction = match (live.incoming, live.phase) {
-            (false, _) => Direction::Outgoing,
-            (true, Phase::Connected(_)) => Direction::Incoming,
-            (true, _) => Direction::Declined,
+        let Some(voice) = self.voice.clone() else {
+            return;
         };
-        let clock = self.clock(live.id, window, cx);
-        self.finish(direction, cx);
-        if let Some(live) = self.live.as_mut() {
-            live._clock = clock;
-        }
+        cx.spawn_in(window, async move |this, cx| {
+            if let Err(error) = voice.answer(id).await {
+                eprintln!("calls: answering: {error}");
+                let _ = this.update(cx, |view, cx| view.note(tr("The call could not be answered"), cx));
+            }
+        })
+        .detach();
+    }
+
+    /// Asks dmail to end the call, or turn down the one ringing here; `sync`
+    /// ends it on screen when it leaves dmail's list.
+    fn hang_up(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(live) = self.live.as_mut().filter(|live| !live.ended()) else {
+            return;
+        };
+        live.turned_down = live.ringing_here();
+        let (Some(id), Some(voice)) = (live.modem, self.voice.clone()) else {
+            live.end_when_known = true;
+            return;
+        };
+        cx.spawn_in(window, async move |this, cx| {
+            if let Err(error) = voice.hangup(id).await {
+                eprintln!("calls: ending the call: {error}");
+                let _ = this.update(cx, |view, cx| view.note(tr("The call could not be ended"), cx));
+            }
+        })
+        .detach();
+    }
+
+    /// Turns the microphone off or on for the other side, through callaudio.
+    pub(super) fn toggle_mute(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(live) = self.live.as_mut() else {
+            return;
+        };
+        let Some(audio) = self.audio.clone() else {
+            return;
+        };
+        let muted = !live.muted;
+        live.muted = muted;
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            if let Err(error) = audio.set_muted(muted).await {
+                eprintln!("calls: muting: {error}");
+                let _ = this.update(cx, |view, cx| {
+                    if let Some(live) = view.live.as_mut() {
+                        live.muted = !muted;
+                    }
+                    view.note(tr("The microphone could not be changed"), cx);
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Tells of a call no one answered.
+    fn notify_missed(&self, number: &str, cx: &mut Context<Self>) {
+        let name = self.people.name(number).to_owned();
+        cx.background_spawn(async move {
+            let posted = async {
+                let bus = zbus::Connection::session().await?;
+                let hints = std::collections::HashMap::from([(
+                    "desktop-entry",
+                    zbus::zvariant::Value::from(crate::instance::NAME),
+                )]);
+                NotificationsProxy::new(&bus)
+                    .await?
+                    .notify("Calls", 0, "call-missed", tr("Missed call"), &name, &[], hints, -1)
+                    .await
+            };
+            if let Err(error) = posted.await {
+                eprintln!("calls: notifying: {error}");
+            }
+        })
+        .detach();
     }
 
     /// The call is over, as `direction` says: it goes in the log and shows
@@ -770,9 +905,13 @@ impl Calls {
             direction,
             time: live.time,
             talked,
-            sample: false,
         };
+        let missed = (direction == Direction::Missed).then(|| call.number.clone());
         self.log.insert(0, call);
+        self.saved.save(&self.log);
+        if let Some(number) = missed {
+            self.notify_missed(&number, cx);
+        }
         self.recents.reset(0);
         cx.notify();
     }
@@ -833,6 +972,7 @@ impl Calls {
 
     fn delete_call(&mut self, id: u64, cx: &mut Context<Self>) {
         self.log.retain(|call| call.id != id);
+        self.saved.save(&self.log);
         self.recents.reset(0);
         self.note(tr("Deleted"), cx);
     }
@@ -1273,7 +1413,7 @@ impl Calls {
     }
 
     /// The top of the window: on the tabs the search bar, where they have
-    /// it, and the round menu button; on other screens the top group. The
+    /// it; on other screens the top group. The
     /// search bar stays between Recents and Contacts and slides with its
     /// screen to and from the keypad; the rest cross-fades.
     fn top_area(&self, width: f32, now: Instant, cx: &mut Context<Self>) -> Div {
@@ -1298,7 +1438,7 @@ impl Calls {
             .left(px(INSET))
             .right(px(INSET))
             .h(dp(GROUP_HEIGHT));
-        // The tabs' search bars and menu button.
+        // The tabs' search bars.
         let tabs = [
             Some((&self.screen, Layer::Shown)),
             leaving.map(|screen| (screen, Layer::Leaving)),
@@ -1336,14 +1476,13 @@ impl Calls {
                         .child(self.search_bar(layer, cx)),
                 );
             }
-            let live = self.screen.tab();
             area = area.child(
                 row()
                     .top(px(-self.top_away.away()))
                     .bottom(px(self.top_away.away()))
                     .opacity(opacity)
                     .child(bars)
-                    .child(self.menu_button(live, cx)),
+                    ,
             );
         }
         // The top group of a screen under another.
@@ -1391,7 +1530,7 @@ impl Calls {
     fn top_contents(&self, screen: &Screen, layer: Layer, cx: &mut Context<Self>) -> Div {
         match screen {
             Screen::Person(who) => self.person_top(who, layer, cx),
-            Screen::Call => self.titled_top(tr("Mock call"), layer, cx),
+            Screen::Call => self.titled_top(tr("Call"), layer, cx),
             Screen::Recents | Screen::Contacts | Screen::Keypad => self.top_row(),
         }
     }
@@ -1446,6 +1585,5 @@ impl Render for Calls {
             .child(shown)
             .child(self.bars(now, cx))
             .child(self.top_area(width, now, cx))
-            .children(self.menu(now, cx))
     }
 }

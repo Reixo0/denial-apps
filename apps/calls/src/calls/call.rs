@@ -166,14 +166,14 @@ impl Calls {
             .gap(dp(4.))
             .p(dp(8.))
             .child(row([
-                self.control(
+                self.control_face(
                     "mute",
                     Icon::Mute,
                     tr("Mute"),
                     live.muted,
-                    active,
+                    active && connected,
                     cx,
-                    |live| live.muted = !live.muted,
+                    |this, window, cx| this.toggle_mute(window, cx),
                 ),
                 self.control(
                     "keypad",
@@ -184,25 +184,27 @@ impl Calls {
                     cx,
                     |live| live.keypad = true,
                 ),
-                self.control(
+                // Calls only have the speakers on this phone so far.
+                self.control_face(
                     "speaker",
                     Icon::Speaker,
                     tr("Speaker"),
-                    live.speaker,
-                    active,
+                    true,
+                    false,
                     cx,
-                    |live| live.speaker = !live.speaker,
+                    |_, _, _| {},
                 ),
             ]))
             .child(row([
-                self.control(
+                // dmail has no request for it yet.
+                self.control_face(
                     "hold",
                     Icon::Hold,
                     tr("Hold"),
                     live.held,
-                    active && connected,
+                    false,
                     cx,
-                    |live| live.held = !live.held,
+                    |_, _, _| {},
                 ),
                 self.action_control(
                     "message",
@@ -316,6 +318,14 @@ impl Calls {
         live.tones.push(key);
         if live.tones.len() > TONES {
             live.tones.remove(0);
+        }
+        if let (Some(id), Some(voice)) = (live.modem, self.voice.clone()) {
+            cx.background_spawn(async move {
+                if let Err(error) = voice.send_dtmf(id, &key.to_string()).await {
+                    eprintln!("calls: sending a tone: {error}");
+                }
+            })
+            .detach();
         }
         cx.notify();
     }

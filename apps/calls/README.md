@@ -1,11 +1,13 @@
 # Calls
 
-Phone and contacts app for Denial phones, written with GPUI. Calls are
-mocked for now: dmail's `org.dmail.Voice1` answers NotSupported to
-everything, so nothing is dialled. Placing a call rings on screen, the other
-side answers after 2.5 s, and the call runs until End. The call screen's top
-group says "Mock call". The menu can simulate a call coming in from a
-favourite or from a number no one has; it rings for 30 s, then is missed.
+Phone and contacts app for Denial phones, written with GPUI. Calls go through
+dmail's `org.dmail.Voice1`: the app places, answers and ends them there and
+follows its `Calls`. Mute is callaudio's. `calls-ringer`, a small user service
+(`packaging/calls-ringer.service`), plays the ringtone with `pw-play` while a
+call comes in and opens the app on it; the app tells of missed calls. Speaker
+is always on, as the phone has no other route for calls yet, and Hold is off,
+as dmail has no request for it. A second call waits unseen until the first
+ends.
 
 It is drawn to Denial's mobile materials, Islands
 (denial/docs/MOBILE_APP_MATERIALS.md), as Messages is, and shares its
@@ -33,9 +35,8 @@ tabs, which slide side by side:
   its button calls it. Call on an empty keypad brings back the number called
   last. A hardware keyboard types on it too.
 
-Recents and Contacts have a search bar at the top, with the round menu
-button beside it; the keypad has only the button. Both leave as the list
-scrolls on and come back as soon as it scrolls back. The search bar finds
+Recents and Contacts have a search bar at the top. It leaves as the list
+scrolls on and comes back as soon as it scrolls back. The search bar finds
 contacts by name or number; a typed number no one has is an accent island
 that calls it.
 
@@ -53,12 +54,8 @@ other screens show it as a bar, over the tab bar on the tabs, with End, and a
 tap on the bar goes back to it. One call at a time.
 
 Contacts come from the contacts folder, `~/.local/share/contacts`, through
-`libraries/denial-contacts`, and follow its changes. Until there are real
-ones, 18 sample contacts and a sample call log are shown; the menu hides them
-and shows them again. Their numbers are in the ranges Ofcom keeps for
-fiction, and the first four are the people of Messages' sample
-conversations, on the same numbers. Favourites are kept on the phone, in
-`$XDG_STATE_HOME/denial/calls/favourites`; the call log is not kept.
+`libraries/denial-contacts`, and follow its changes. Favourites are kept on the phone, in
+`$XDG_STATE_HOME/denial/calls/favourites`, and the calls in `log` beside it.
 
 Message opens Messages on the number: `messages <number>`, from beside the
 Calls binary, else from the PATH. A running Messages takes it.

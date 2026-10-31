@@ -1,13 +1,13 @@
-//! The tab bar, the tabs' menu, and Recents: the call log in day islands,
+//! The tab bar and Recents: the call log in day islands,
 //! Today, Yesterday and Earlier, each with its label inside.
 
 use denial_look::words::tr;
 use std::time::Instant;
 
-use denial_look::mobile::{GESTURE_INSET, GROUP_HEIGHT, TAB_BAR, content_top};
+use denial_look::mobile::{GESTURE_INSET, TAB_BAR, content_top};
 use denial_look::{INSET, floating};
-use denial_look_gpui::{Icon, color, dp, glass_group, icon, island_fill, solid};
-use gpui::{AnyElement, Context, Div, FontWeight, Window, div, list, prelude::*, px, relative};
+use denial_look_gpui::{Icon, color, dp, icon, island_fill, solid};
+use gpui::{AnyElement, Context, Div, FontWeight, div, list, prelude::*, px, relative};
 
 use super::parts::{Face, Fill, ROW_AVATAR, SMALL_ICON, Segment, place};
 use super::{Calls, Confirm, Held, Layer, Overlay, Screen};
@@ -64,8 +64,7 @@ impl Calls {
             let island = self.state_island(
                 Icon::Phone,
                 tr("No calls yet"),
-                "Calls you make and get show here. Calls are mocked for now: nothing is \
-                 dialled, and no one is reached.",
+                "Calls you make and get show here.",
                 Some(self.button(
                     "open-keypad",
                     Face::Both(Icon::Keypad, tr("Open the keypad")),
@@ -331,71 +330,5 @@ impl Calls {
             .border_color(color(palette.foreground, palette.edge_alpha))
             .pb(px(GESTURE_INSET))
             .child(tabs)
-    }
-
-    /// The tabs' menu button, round, at the top on the right.
-    pub(super) fn menu_button(&self, live: bool, cx: &mut Context<Self>) -> Div {
-        let button = self.button(
-            "menu",
-            Face::Icon(Icon::More),
-            Fill::Clear,
-            live,
-            cx,
-            |this, _, cx| this.show(Overlay::Menu, cx),
-        );
-        self.round_group(button, GROUP_HEIGHT)
-    }
-
-    /// The menu under the top group: a made-up incoming call, and the sample
-    /// contacts and calls shown or hidden.
-    pub(super) fn menu(&self, now: Instant, cx: &mut Context<Self>) -> Option<Div> {
-        if !matches!(self.overlay, Some((Overlay::Menu, _))) {
-            return None;
-        }
-        let shown = !self.samples_hidden.on();
-        let item = |id: &'static str,
-                    face: Face,
-                    cx: &mut Context<Self>,
-                    action: fn(&mut Self, &mut Window, &mut Context<Self>)| {
-            self.button(id, face, Fill::Clear, true, cx, action)
-                .justify_start()
-        };
-        Some(
-            div()
-                .absolute()
-                .top(px(INSET * 2. - self.top_away.away()) + dp(GROUP_HEIGHT))
-                .right(px(INSET))
-                .opacity(self.dim(now))
-                .child(
-                    glass_group(&self.look)
-                        .flex()
-                        .flex_col()
-                        .items_stretch()
-                        .p(dp(4.))
-                        .child(item(
-                            "incoming",
-                            Face::Both(Icon::Incoming, tr("Simulate an incoming call")),
-                            cx,
-                            |this, window, cx| this.simulate_incoming(window, cx),
-                        ))
-                        .child(item(
-                            "samples",
-                            Face::Both(
-                                Icon::Person,
-                                if shown {
-                                    tr("Hide sample contacts")
-                                } else {
-                                    tr("Show sample contacts")
-                                },
-                            ),
-                            cx,
-                            |this, _, cx| {
-                                this.overlay = None;
-                                let shown = this.samples_hidden.on();
-                                this.show_samples(shown, cx);
-                            },
-                        )),
-                ),
-        )
     }
 }
