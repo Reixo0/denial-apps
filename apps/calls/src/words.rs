@@ -30,6 +30,7 @@ pub static CHINESE: &[(&str, &str)] = &[
     ("The call could not be answered", "无法接听电话"),
     ("The call could not be ended", "无法结束通话"),
     ("The microphone could not be changed", "无法更改麦克风状态"),
+    ("The speaker could not be changed", "无法切换扬声器"),
     ("Hold", "保持"),
     ("Mute", "静音"),
     ("Speaker", "扬声器"),

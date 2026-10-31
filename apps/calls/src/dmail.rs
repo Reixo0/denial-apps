@@ -36,6 +36,10 @@ pub trait CallAudio1 {
     /// Only during a call; each call starts unmuted.
     #[zbus(property)]
     fn set_muted(&self, muted: bool) -> zbus::Result<()>;
+
+    /// Only during a call; each call starts on the earpiece.
+    #[zbus(property)]
+    fn set_speaker(&self, speaker: bool) -> zbus::Result<()>;
 }
 
 #[proxy(

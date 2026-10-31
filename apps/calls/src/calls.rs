@@ -320,6 +320,7 @@ struct Live {
     /// Unix time it started ringing.
     time: i64,
     muted: bool,
+    speaker: bool,
     held: bool,
     /// The in-call keypad shows in place of the controls.
     keypad: bool,
@@ -763,6 +764,7 @@ impl Calls {
             phase: Phase::Ringing(Instant::now()),
             time: data::now(),
             muted: false,
+            speaker: false,
             held: false,
             keypad: false,
             tones: String::new(),
@@ -861,6 +863,31 @@ impl Calls {
                         live.muted = !muted;
                     }
                     view.note(tr("The microphone could not be changed"), cx);
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Moves the call between the earpiece and the speakers, through callaudio.
+    pub(super) fn toggle_speaker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(live) = self.live.as_mut() else {
+            return;
+        };
+        let Some(audio) = self.audio.clone() else {
+            return;
+        };
+        let speaker = !live.speaker;
+        live.speaker = speaker;
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            if let Err(error) = audio.set_speaker(speaker).await {
+                eprintln!("calls: changing the speaker: {error}");
+                let _ = this.update(cx, |view, cx| {
+                    if let Some(live) = view.live.as_mut() {
+                        live.speaker = !speaker;
+                    }
+                    view.note(tr("The speaker could not be changed"), cx);
                 });
             }
         })

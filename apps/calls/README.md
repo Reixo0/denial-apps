@@ -5,8 +5,8 @@ dmail's `org.dmail.Voice1`: the app places, answers and ends them there and
 follows its `Calls`. Mute is callaudio's. `calls-ringer`, a small user service
 (`packaging/calls-ringer.service`), plays the ringtone with `pw-play` while a
 call comes in and opens the app on it; the app tells of missed calls. Speaker
-is always on, as the phone has no other route for calls yet, and Hold is off,
-as dmail has no request for it. A second call waits unseen until the first
+moves a call from the earpiece through callaudio, and Hold is off, as dmail has
+no request for it. A second call waits unseen until the first
 ends.
 
 It is drawn to Denial's mobile materials, Islands

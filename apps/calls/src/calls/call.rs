@@ -184,15 +184,14 @@ impl Calls {
                     cx,
                     |live| live.keypad = true,
                 ),
-                // Calls only have the speakers on this phone so far.
                 self.control_face(
                     "speaker",
                     Icon::Speaker,
                     tr("Speaker"),
-                    true,
-                    false,
+                    live.speaker,
+                    active,
                     cx,
-                    |_, _, _| {},
+                    |this, window, cx| this.toggle_speaker(window, cx),
                 ),
             ]))
             .child(row([
