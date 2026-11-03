@@ -620,6 +620,15 @@ pub static GROUPS: &[Group] = &[
                     section(
                         "Keyboard",
                         &[
+                            item(
+                                "language.layout",
+                                "Layout",
+                                Kind::Segmented(&["English", "Español"], 0),
+                            )
+                            .from(Source::Words("osk.layout", &["en", "es"])),
+                            item("language.pckeys", "PC keys row", Kind::Toggle(false))
+                                .detail("Esc, Tab, Ctrl, Alt, Home, End, arrows")
+                                .denial("osk.pcKeys"),
                             item("language.correct", "Autocorrect", Kind::Toggle(false)).fixed(),
                             item(
                                 "language.popup",
