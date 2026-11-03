@@ -629,7 +629,9 @@ pub static GROUPS: &[Group] = &[
                             item("language.pckeys", "PC keys row", Kind::Toggle(false))
                                 .detail("Esc, Tab, Ctrl, Alt, Home, End, arrows")
                                 .denial("osk.pcKeys"),
-                            item("language.correct", "Autocorrect", Kind::Toggle(false)).fixed(),
+                            item("language.correct", "Autocorrect", Kind::Toggle(true))
+                                .detail("Fix misspelt words as you type")
+                                .denial("osk.autocorrect"),
                             item(
                                 "language.popup",
                                 "Show the key you press",
