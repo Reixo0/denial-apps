@@ -38,6 +38,8 @@ pub enum Content {
     Battery,
     /// The display, through deniald.
     Display,
+    /// The RGB lights, through their LEDs. Listed only on a phone with them.
+    Lights,
     /// What the phone is, from the kernel, BlueZ, dmail and deniald.
     About,
     /// The storage: used and free, and what uses it.
@@ -268,6 +270,13 @@ pub static GROUPS: &[Group] = &[
                 icon: Icon::Display,
                 summary: "Brightness, appearance, timeout",
                 content: Content::Display,
+            },
+            Page {
+                id: "lights",
+                title: "Lights",
+                icon: Icon::Light,
+                summary: "Logo, triggers, fan",
+                content: Content::Lights,
             },
             Page {
                 id: "monitor",
@@ -748,9 +757,14 @@ pub static GROUPS: &[Group] = &[
 /// Whether a monitor is plugged in beside the phone, as Settings last
 /// found: its page is listed only then.
 static MONITOR: AtomicBool = AtomicBool::new(false);
+static LIGHTS: AtomicBool = AtomicBool::new(false);
 
 pub fn set_monitor(plugged: bool) {
     MONITOR.store(plugged, Ordering::Relaxed);
+}
+
+pub fn set_lights(present: bool) {
+    LIGHTS.store(present, Ordering::Relaxed);
 }
 
 /// Whether the home screen lists `page` now.
@@ -758,6 +772,7 @@ pub fn shown(page: &Page) -> bool {
     match page.content {
         Content::Hidden(_) => false,
         Content::Monitor(_) => MONITOR.load(Ordering::Relaxed),
+        Content::Lights => LIGHTS.load(Ordering::Relaxed),
         _ => true,
     }
 }
@@ -795,6 +810,7 @@ pub fn items() -> impl Iterator<Item = (&'static Page, &'static Section, &'stati
             | Content::Bluetooth
             | Content::Battery
             | Content::Display
+            | Content::Lights
             | Content::About
             | Content::Storage
             | Content::Hidden(_)

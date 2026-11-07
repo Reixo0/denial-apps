@@ -43,6 +43,7 @@ impl Settings {
                         Content::Settings(_)
                         | Content::Apps(_)
                         | Content::Display
+                        | Content::Lights
                         | Content::Hidden(_)
                         | Content::Unavailable => None,
                     };

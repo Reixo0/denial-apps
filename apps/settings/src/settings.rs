@@ -12,6 +12,7 @@ mod devices;
 mod dialogs;
 mod fingers;
 mod home;
+mod lights;
 mod monitor;
 mod networks;
 mod page;
@@ -561,6 +562,7 @@ pub struct Settings {
     wifi: Wifi,
     mobile: Mobile,
     power: Power,
+    lights: lights::State,
     denial: Denial,
     lock: Lock,
     fingers: Fingers,
@@ -759,6 +761,7 @@ impl Settings {
             mobile: Mobile::default(),
             _mobile: cx.spawn(async move |this, cx| Self::follow_mobile(this, cx).await),
             power: Power::default(),
+            lights: lights::State::load(),
             _power: cx.spawn(async move |this, cx| Self::follow_power(this, cx).await),
             denial: Denial {
                 link: denial::Link::new(),
@@ -1274,7 +1277,9 @@ impl Settings {
             self.notice.as_ref().map(|(_, fade, _)| *fade),
             Some(self.keyboard.motion),
         ];
-        self.arrival.running(now) || tweens.iter().flatten().any(|tween| tween.running(now))
+        self.arrival.running(now)
+            || self.lights.animating(now)
+            || tweens.iter().flatten().any(|tween| tween.running(now))
     }
 
     /// How far the screen is dimmed behind a dialog, 0 to 1.
@@ -1326,6 +1331,7 @@ impl Settings {
                 Content::Bluetooth => self.bluetooth_page(layer, cx),
                 Content::Battery => self.battery_page(layer, cx),
                 Content::Display => self.display_page(layer, cx),
+                Content::Lights => self.lights_page(layer, cx),
                 Content::About => self.about_page(layer, cx),
                 Content::Storage => self.storage_page(),
                 Content::Apps(sections) => self.apps_page(sections, layer, cx),

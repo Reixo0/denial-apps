@@ -10,6 +10,7 @@ mod droidloom;
 mod fingerprint;
 mod instance;
 mod language;
+mod lights;
 mod lock;
 mod mobile;
 mod name;

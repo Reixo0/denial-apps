@@ -39,6 +39,7 @@ pub enum Icon {
     Keyboard,
     Keypad,
     Language,
+    Light,
     Location,
     Lock,
     Message,
@@ -80,7 +81,7 @@ pub enum Icon {
     WifiWeak,
 }
 
-const ALL: [Icon; 71] = [
+const ALL: [Icon; 72] = [
     Icon::Accessibility,
     Icon::Airplane,
     Icon::Alert,
@@ -113,6 +114,7 @@ const ALL: [Icon; 71] = [
     Icon::Keyboard,
     Icon::Keypad,
     Icon::Language,
+    Icon::Light,
     Icon::Location,
     Icon::Lock,
     Icon::Message,
@@ -189,6 +191,7 @@ impl Icon {
             Icon::Keyboard => "keyboard",
             Icon::Keypad => "keypad",
             Icon::Language => "language",
+            Icon::Light => "light",
             Icon::Location => "location",
             Icon::Lock => "lock",
             Icon::Message => "message",
@@ -305,6 +308,9 @@ impl Icon {
             }
             Icon::Language => {
                 r#"<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9c-2.5-2.6-3.8-5.6-3.8-9S9.5 5.6 12 3z"/>"#
+            }
+            Icon::Light => {
+                r#"<path d="M9 18h6M10 21h4"/><path d="M12 3a6 6 0 00-3.6 10.8c.7.5 1.1 1.3 1.1 2.2v1h5v-1c0-.9.4-1.7 1.1-2.2A6 6 0 0012 3z"/>"#
             }
             Icon::Location => {
                 r#"<path d="M12 21s-6.5-6-6.5-11a6.5 6.5 0 0113 0c0 5-6.5 11-6.5 11z"/><circle cx="12" cy="10" r="2.5"/>"#
