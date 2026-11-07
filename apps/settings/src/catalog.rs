@@ -40,6 +40,9 @@ pub enum Content {
     Display,
     /// The RGB lights, through their LEDs. Listed only on a phone with them.
     Lights,
+    /// What the game mode slider does, for nx809j-slider. Listed only with
+    /// it.
+    Slider,
     /// What the phone is, from the kernel, BlueZ, dmail and deniald.
     About,
     /// The storage: used and free, and what uses it.
@@ -277,6 +280,13 @@ pub static GROUPS: &[Group] = &[
                 icon: Icon::Light,
                 summary: "Logo, triggers, fan",
                 content: Content::Lights,
+            },
+            Page {
+                id: "slider",
+                title: "Slider",
+                icon: Icon::Slider,
+                summary: "What the game mode slider does",
+                content: Content::Slider,
             },
             Page {
                 id: "monitor",
@@ -758,9 +768,14 @@ pub static GROUPS: &[Group] = &[
 /// found: its page is listed only then.
 static MONITOR: AtomicBool = AtomicBool::new(false);
 static LIGHTS: AtomicBool = AtomicBool::new(false);
+static SLIDER: AtomicBool = AtomicBool::new(false);
 
 pub fn set_monitor(plugged: bool) {
     MONITOR.store(plugged, Ordering::Relaxed);
+}
+
+pub fn set_slider(present: bool) {
+    SLIDER.store(present, Ordering::Relaxed);
 }
 
 pub fn set_lights(present: bool) {
@@ -773,6 +788,7 @@ pub fn shown(page: &Page) -> bool {
         Content::Hidden(_) => false,
         Content::Monitor(_) => MONITOR.load(Ordering::Relaxed),
         Content::Lights => LIGHTS.load(Ordering::Relaxed),
+        Content::Slider => SLIDER.load(Ordering::Relaxed),
         _ => true,
     }
 }
@@ -811,6 +827,7 @@ pub fn items() -> impl Iterator<Item = (&'static Page, &'static Section, &'stati
             | Content::Battery
             | Content::Display
             | Content::Lights
+            | Content::Slider
             | Content::About
             | Content::Storage
             | Content::Hidden(_)

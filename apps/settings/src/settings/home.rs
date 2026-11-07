@@ -44,6 +44,7 @@ impl Settings {
                         | Content::Apps(_)
                         | Content::Display
                         | Content::Lights
+                        | Content::Slider
                         | Content::Hidden(_)
                         | Content::Unavailable => None,
                     };

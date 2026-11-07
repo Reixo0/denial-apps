@@ -20,6 +20,7 @@ mod panel;
 mod parts;
 mod phone;
 mod power;
+mod slider;
 mod system;
 mod wallpapers;
 
@@ -563,6 +564,7 @@ pub struct Settings {
     mobile: Mobile,
     power: Power,
     lights: lights::State,
+    slider: slider::State,
     denial: Denial,
     lock: Lock,
     fingers: Fingers,
@@ -762,6 +764,7 @@ impl Settings {
             _mobile: cx.spawn(async move |this, cx| Self::follow_mobile(this, cx).await),
             power: Power::default(),
             lights: lights::State::load(),
+            slider: slider::State::load(),
             _power: cx.spawn(async move |this, cx| Self::follow_power(this, cx).await),
             denial: Denial {
                 link: denial::Link::new(),
@@ -1008,7 +1011,7 @@ impl Settings {
         if self.screen.is_page("storage") {
             self.read_storage(cx);
         }
-        if self.screen.is_page("apps") {
+        if self.screen.is_page("apps") || self.screen.is_page("slider") {
             self.read_apps(cx);
         }
         if self.screen.is_page("security") {
@@ -1279,6 +1282,7 @@ impl Settings {
         ];
         self.arrival.running(now)
             || self.lights.animating(now)
+            || self.slider.animating(now)
             || tweens.iter().flatten().any(|tween| tween.running(now))
     }
 
@@ -1332,6 +1336,7 @@ impl Settings {
                 Content::Battery => self.battery_page(layer, cx),
                 Content::Display => self.display_page(layer, cx),
                 Content::Lights => self.lights_page(layer, cx),
+                Content::Slider => self.slider_page(layer, cx),
                 Content::About => self.about_page(layer, cx),
                 Content::Storage => self.storage_page(),
                 Content::Apps(sections) => self.apps_page(sections, layer, cx),

@@ -65,6 +65,7 @@ pub enum Icon {
     Settings,
     Share,
     Shield,
+    Slider,
     Sim,
     Speaker,
     Star,
@@ -81,7 +82,7 @@ pub enum Icon {
     WifiWeak,
 }
 
-const ALL: [Icon; 72] = [
+const ALL: [Icon; 73] = [
     Icon::Accessibility,
     Icon::Airplane,
     Icon::Alert,
@@ -140,6 +141,7 @@ const ALL: [Icon; 72] = [
     Icon::Settings,
     Icon::Share,
     Icon::Shield,
+    Icon::Slider,
     Icon::Sim,
     Icon::Speaker,
     Icon::Star,
@@ -217,6 +219,7 @@ impl Icon {
             Icon::Settings => "settings",
             Icon::Share => "share",
             Icon::Shield => "shield",
+            Icon::Slider => "slider",
             Icon::Sim => "sim",
             Icon::Speaker => "speaker",
             Icon::Star => "star",
@@ -358,6 +361,9 @@ impl Icon {
             }
             Icon::Shield => {
                 r#"<path d="M12 3l7.5 3v5.5c0 4.5-3.2 8.2-7.5 9.5-4.3-1.3-7.5-5-7.5-9.5V6z"/>"#
+            }
+            Icon::Slider => {
+                r#"<rect x="2.5" y="7" width="19" height="10" rx="5"/><circle cx="16.5" cy="12" r="2.5"/>"#
             }
             Icon::Sim => r#"<path d="M7 3h7l4 4v14H7z"/><path d="M10 12h5v5h-5z"/>"#,
             Icon::Speaker => {
