@@ -21,6 +21,15 @@ use super::{Layer, Settings};
 const SERVICE: &str = "/usr/bin/nx809j-slider";
 
 const ACTIONS: &[&str] = &["Flashlight", "Camera", "An app"];
+
+/// The flash's LEDs, which the flashlight lights together.
+const FLASH_LEDS: [&str; 2] = [
+    "/sys/class/leds/yellow:flash-0/brightness",
+    "/sys/class/leds/white:flash-1/brightness",
+];
+/// The torch level at full strength, of the LED's 255: about 300 mA per
+/// LED, the most tried so far. nx809j-slider maps strength the same way.
+const TORCH_MAX: f32 = 150.0;
 const WORDS: [&str; 3] = ["flashlight", "camera", "app"];
 
 pub(super) struct State {
@@ -28,6 +37,8 @@ pub(super) struct State {
     action: usize,
     /// The picked app's desktop entry id.
     app: Option<String>,
+    /// The flashlight's strength, 0 to 1.
+    strength: f32,
     /// The app list shows under its name.
     open: bool,
     /// The list opening or closing.
@@ -55,6 +66,9 @@ impl State {
                 .position(|word| value["action"].as_str() == Some(*word))
                 .unwrap_or(0),
             app: value["app"].as_str().map(str::to_owned),
+            strength: value["strength"]
+                .as_f64()
+                .map_or(0.4, |strength| (strength as f32).clamp(0.05, 1.0)),
             open: false,
             flip: None,
         }
@@ -65,7 +79,11 @@ impl State {
         if let Some(dir) = file.parent() {
             fs::create_dir_all(dir)?;
         }
-        let value = json!({ "action": WORDS[self.action], "app": self.app });
+        let value = json!({
+            "action": WORDS[self.action],
+            "app": self.app,
+            "strength": self.strength,
+        });
         let temporary = file.with_extension("json.tmp");
         fs::write(&temporary, value.to_string())?;
         fs::rename(temporary, file)
@@ -106,6 +124,27 @@ impl Settings {
                 this.keep_slider(cx);
             }),
         ))];
+        if state.action == 0 {
+            parts.push(island(&self.look).child(self.level_row(
+                "slider.strength",
+                None,
+                "Flashlight strength",
+                None,
+                state.strength,
+                live,
+                (true, true),
+                cx,
+                Rc::new(|this, level, done, cx| {
+                    this.slider.strength = level.clamp(0.05, 1.0);
+                    this.light_torch();
+                    if done {
+                        this.keep_slider(cx);
+                    } else {
+                        cx.notify();
+                    }
+                }),
+            )));
+        }
         if state.action != 2 {
             return parts;
         }
@@ -187,10 +226,29 @@ impl Settings {
         parts
     }
 
+    /// While the flashlight is on, show the strength on it at once.
+    fn light_torch(&self) {
+        let on = FLASH_LEDS.iter().any(|led| {
+            fs::read_to_string(led).is_ok_and(|level| level.trim().parse::<u32>().unwrap_or(0) > 0)
+        });
+        if !on {
+            return;
+        }
+        let level = torch_level(self.slider.strength);
+        for led in FLASH_LEDS {
+            let _ = fs::write(led, level.to_string());
+        }
+    }
+
     fn keep_slider(&mut self, cx: &mut Context<Self>) {
         if let Err(error) = self.slider.save() {
             self.note(format!("Could not keep the slider's action: {error}"), cx);
         }
         cx.notify();
     }
+}
+
+/// The torch level for `strength`, 0 to 1, as nx809j-slider has it.
+fn torch_level(strength: f32) -> u32 {
+    (1.0 + strength.clamp(0.0, 1.0) * (TORCH_MAX - 1.0)).round() as u32
 }
