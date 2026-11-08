@@ -216,8 +216,16 @@ where its value lives (`src/settings/bound.rs`):
   depth mask of the new picture, as the shell's picker does.
 - In Settings' own code (`src/settings/system.rs`): date and time, the
   language, Android starting.
+- The privacy switches (`src/settings/privacy.rs`): the camera, the
+  microphone and location, for every app and then for each app that has
+  used it, kept in `~/.config/denial/privacy.json` for the phone's privacy
+  service (nx809j-privacy), which hands them to PipeWire, the camera
+  service and geoclue. The apps come from the service's
+  `$XDG_STATE_HOME/denial/privacy-seen.json`, what uses each now from
+  `$XDG_RUNTIME_DIR/denial/privacy-usage.json`. Without the service the
+  switches show faint.
 - Not on the phone yet: the keyboard, default apps, the ringtone, vibrating for calls, touch sounds,
-  always showing the clock and the privacy switches. They show faint, on
+  always showing the clock and showing letters as you type. They show faint, on
   their values, and cannot be changed. "Recently sent" says it is not
   available yet.
 - Made up: the rest. Changing one reaches nothing on the phone; the values

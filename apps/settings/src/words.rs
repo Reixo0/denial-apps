@@ -251,6 +251,12 @@ pub static CHINESE: &[(&str, &str)] = &[
     ("Location", "位置"),
     ("Passwords", "密码"),
     ("Show letters as you type", "输入时显示字符"),
+    ("Off for every app", "对所有应用关闭"),
+    ("In use by {apps}", "正在使用：{apps}"),
+    ("Not on this phone yet", "此手机暂不支持"),
+    ("Apps that used the camera", "使用过相机的应用"),
+    ("Apps that used the microphone", "使用过麦克风的应用"),
+    ("Apps that asked for location", "请求过位置的应用"),
     // Apps.
     ("Defaults", "默认应用"),
     ("Android apps", "安卓应用"),

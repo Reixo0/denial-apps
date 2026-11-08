@@ -47,6 +47,9 @@ pub enum Content {
     About,
     /// The storage: used and free, and what uses it.
     Storage,
+    /// The camera, the microphone and location, for every app and each,
+    /// through the phone's privacy service; then settings in sections.
+    Privacy(&'static [Section]),
     /// Settings in sections, then the apps installed.
     Apps(&'static [Section]),
     /// Android through Droidloom: the switch in sections, then how it runs
@@ -561,31 +564,15 @@ pub static GROUPS: &[Group] = &[
                 title: "Privacy",
                 icon: Icon::Shield,
                 summary: "Camera, microphone, location",
-                content: Content::Settings(&[
-                    section(
-                        "Access",
-                        &[
-                            item("privacy.camera", "Camera", Kind::Toggle(true))
-                                .detail("For all apps")
-                                .fixed(),
-                            item("privacy.microphone", "Microphone", Kind::Toggle(true))
-                                .detail("For all apps")
-                                .fixed(),
-                            item("privacy.location", "Location", Kind::Toggle(true))
-                                .icon(Icon::Location)
-                                .fixed(),
-                        ],
-                    ),
-                    section(
-                        "Passwords",
-                        &[item(
-                            "privacy.reveal",
-                            "Show letters as you type",
-                            Kind::Toggle(true),
-                        )
-                        .fixed()],
-                    ),
-                ]),
+                content: Content::Privacy(&[section(
+                    "Passwords",
+                    &[item(
+                        "privacy.reveal",
+                        "Show letters as you type",
+                        Kind::Toggle(true),
+                    )
+                    .fixed()],
+                )]),
             },
         ],
     },
@@ -818,6 +805,7 @@ pub fn items() -> impl Iterator<Item = (&'static Page, &'static Section, &'stati
     listed().flat_map(|page| {
         let sections = match page.content {
             Content::Settings(sections)
+            | Content::Privacy(sections)
             | Content::Apps(sections)
             | Content::Android(sections)
             | Content::Monitor(sections) => sections,

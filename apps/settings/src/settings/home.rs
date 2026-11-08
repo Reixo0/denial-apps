@@ -41,6 +41,7 @@ impl Settings {
                         Content::Android(_) => Some(self.android_summary()),
                         Content::Monitor(_) => self.monitor_summary(),
                         Content::Settings(_)
+                        | Content::Privacy(_)
                         | Content::Apps(_)
                         | Content::Display
                         | Content::Lights

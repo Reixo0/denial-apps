@@ -13,6 +13,9 @@ pub struct App {
     pub id: String,
     pub name: String,
     pub icon: Option<PathBuf>,
+    /// The file name of the program it runs: "firefox". Privacy knows the
+    /// apps that used the microphone or camera by it.
+    pub binary: Option<String>,
     /// For an Android app Droidloom put in the launcher: its package and
     /// launcher activity.
     pub android: Option<Android>,
@@ -119,6 +122,7 @@ fn entry(id: &str, path: &Path, dirs: &[PathBuf]) -> Option<App> {
     Some(App {
         id: id.to_owned(),
         name: (*name).to_owned(),
+        binary: fields.get("Exec").and_then(|exec| binary(exec)),
         icon: fields
             .get("Icon")
             .filter(|icon| !icon.is_empty())
@@ -133,6 +137,17 @@ fn entry(id: &str, path: &Path, dirs: &[PathBuf]) -> Option<App> {
                     .map(|component| (*component).to_owned()),
             }),
     })
+}
+
+/// The file name of the program an `Exec` line runs, past `env` and its
+/// variables.
+fn binary(exec: &str) -> Option<String> {
+    exec.split_whitespace()
+        .find(|word| *word != "env" && !word.contains('='))
+        .map(|program| program.trim_matches('"'))
+        .and_then(|program| program.rsplit('/').next())
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
 }
 
 const PICTURES: [&str; 3] = ["png", "svg", "jpg"];
@@ -214,6 +229,20 @@ fn in_theme(theme: &Path, icon: &str) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn binary_is_the_program_past_env() {
+        assert_eq!(super::binary("firefox %u").as_deref(), Some("firefox"));
+        assert_eq!(
+            super::binary("env GDK_BACKEND=wayland /usr/bin/gnome-maps").as_deref(),
+            Some("gnome-maps")
+        );
+        assert_eq!(
+            super::binary("\"/opt/app/run\" --x").as_deref(),
+            Some("run")
+        );
+        assert_eq!(super::binary(""), None);
+    }
+
     /// Lists the apps on a phone: `cargo test -- --ignored --nocapture
     /// lists_apps`, as the session's user.
     #[test]
