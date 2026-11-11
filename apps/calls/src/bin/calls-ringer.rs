@@ -1,7 +1,8 @@
-//! Rings while a call comes in, wakes the screen and opens Calls on it; dmail
-//! itself never rings. Turns the screen off while a call on the earpiece is held
-//! to the ear. While the session is locked, posts the call as a notification
-//! whose actions the lock screen offers without the PIN.
+//! Rings and vibrates while a call comes in, wakes the screen and opens Calls
+//! on it; dmail itself never rings. Turns the screen off while a call on the
+//! earpiece is held to the ear. While the session is locked, posts the call as
+//! a notification of Calls, whose actions the lock screen offers without the
+//! PIN; while it stands, Denial shows Calls' window over the lock screen.
 //! Sleeps on D-Bus, needs no window, and is started at login by
 //! calls-ringer.service. callaudio leaves the sound card on its normal profile
 //! while a call rings here, so the ringtone plays.
@@ -148,7 +149,7 @@ async fn run() -> zbus::Result<()> {
     let app = AppProxy::new(&session).await?;
     let notifications = NotificationsProxy::new(&session).await?;
     let mut actions = notifications.receive_action_invoked().await?;
-    let seat_session = seat_session(&system).await;
+    let mut seat_session = seat_session(&system).await;
     let mut locked_changes = match &seat_session {
         Some(session) => Some(session.receive_locked_hint_changed().await),
         None => None,
@@ -169,6 +170,19 @@ async fn run() -> zbus::Result<()> {
     loop {
         match event {
             Event::Calls(list) => {
+                // Denial restarting makes a new session; read the lock from
+                // the one there now, and follow that one from here on.
+                if let Some(current) = self::seat_session(&system).await {
+                    if seat_session.as_ref().map(|session| session.inner().path())
+                        != Some(current.inner().path())
+                    {
+                        locked_changes = Some(current.receive_locked_hint_changed().await);
+                        seat_session = Some(current);
+                    }
+                    if let Some(session) = &seat_session {
+                        locked = session.locked_hint().await.unwrap_or(locked);
+                    }
+                }
                 let talking = list
                     .iter()
                     .any(|call| matches!(call.3.as_str(), "dialing" | "alerting" | "active" | "held"));
@@ -313,7 +327,7 @@ impl CallCard {
 
     fn name(&self) -> String {
         if self.number.is_empty() {
-            return "No caller ID".into();
+            return "Unknown caller".into();
         }
         // Read afresh: calls are rare and the folder can change.
         let contacts = Contacts::folder().map(|folder| Contacts::load(&folder));
@@ -342,9 +356,9 @@ async fn show_card(
     let (category, body, actions): (_, _, &[&str]) = if card.ringing {
         ("call.incoming", "Incoming call", &["decline", "Decline", "answer", "Answer"])
     } else if card.speaker {
-        ("call.ongoing", "In a call", &["speaker", "Earpiece", "end", "End"])
+        ("call", "In a call", &["speaker", "Earpiece", "end", "End"])
     } else {
-        ("call.ongoing", "In a call", &["speaker", "Speaker", "end", "End"])
+        ("call", "In a call", &["speaker", "Speaker", "end", "End"])
     };
     let hints = HashMap::from([
         ("category", Value::from(category)),
@@ -459,6 +473,8 @@ fn follow(calls: Vec<Call>, ringing: &mut Option<Arc<AtomicBool>>) {
             let stop = Arc::new(AtomicBool::new(false));
             let flag = stop.clone();
             std::thread::spawn(move || ring(&flag));
+            let flag = stop.clone();
+            std::thread::spawn(move || vibrate(&flag));
             *ringing = Some(stop);
         }
         (false, true) => {
@@ -496,6 +512,53 @@ fn ring(stop: &AtomicBool) {
                     break;
                 }
             }
+        }
+    }
+}
+
+/// hapticd, whose patterns ring the phone's vibration motor.
+#[proxy(
+    interface = "org.hapticd.Haptics1",
+    default_service = "org.hapticd",
+    default_path = "/org/hapticd/Haptics"
+)]
+trait Haptics1 {
+    /// Steps of duration in ms and intensity, 0 to 1; on the default device
+    /// when `device` is empty. Returns the effect's id.
+    fn play_pattern(&self, device: &str, steps: &[(u32, f64)]) -> zbus::Result<u64>;
+
+    fn cancel(&self, effect: u64) -> zbus::Result<()>;
+}
+
+/// Vibrates in Android's default ring pattern, 1 s on and 1 s off, until told
+/// to stop. hapticd plays at most 30 s at a time, so each request is half that
+/// and the next follows as it runs out.
+fn vibrate(stop: &AtomicBool) {
+    const BEATS: u32 = 15;
+    const ON: u32 = 1000;
+    const OFF: u32 = 1000;
+    let haptics = zbus::blocking::Connection::system()
+        .and_then(|bus| Haptics1ProxyBlocking::new(&bus));
+    let haptics = match haptics {
+        Ok(haptics) => haptics,
+        Err(error) => return eprintln!("calls-ringer: reaching hapticd: {error}"),
+    };
+    let steps: Vec<(u32, f64)> = (0..BEATS).flat_map(|_| [(ON, 1.0), (OFF, 0.0)]).collect();
+    let length = Duration::from_millis(u64::from(BEATS * (ON + OFF)));
+    while !stop.load(Ordering::Relaxed) {
+        let effect = match haptics.play_pattern("", &steps) {
+            Ok(effect) => effect,
+            Err(error) => return eprintln!("calls-ringer: vibrating: {error}"),
+        };
+        let started = std::time::Instant::now();
+        while started.elapsed() < length {
+            if stop.load(Ordering::Relaxed) {
+                if let Err(error) = haptics.cancel(effect) {
+                    eprintln!("calls-ringer: stopping the vibration: {error}");
+                }
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
         }
     }
 }
