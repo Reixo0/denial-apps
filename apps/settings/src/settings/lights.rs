@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use denial_look::mobile::TOUCH;
 use denial_look::{Tween, decelerate, lerp, lerp_rgb, motion, stagger};
-use denial_look_gpui::{control_fill, dp, island, solid};
+use denial_look_gpui::{Icon, control_fill, dp, island, solid};
 use gpui::{
     Context, DispatchPhase, Div, ElementId, HitboxBehavior, Hsla, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, Pixels, Stateful, TouchDragEvent, TouchPhase, Transformation,
@@ -18,7 +18,7 @@ use gpui::{
 
 use super::page::FAINT;
 use super::parts::ROW_PAD;
-use super::{Layer, Settings};
+use super::{Dialog, Layer, Screen, Settings};
 use crate::lights::{self, Effect, FAN, Light, Lights};
 
 /// Colours that look right on the LEDs: pure, with no white in them.
@@ -53,6 +53,8 @@ struct Keys {
     brightness: &'static str,
     effect: &'static str,
     speed: &'static str,
+    lights: &'static str,
+    duration: &'static str,
 }
 
 macro_rules! keys {
@@ -68,6 +70,8 @@ macro_rules! keys {
             brightness: concat!("lights.", $light, ".brightness"),
             effect: concat!("lights.", $light, ".effect"),
             speed: concat!("lights.", $light, ".speed"),
+            lights: concat!("lights.", $light, ".lights"),
+            duration: concat!("lights.", $light, ".duration"),
         }
     };
 }
@@ -86,7 +90,16 @@ const LIGHTS: [Keys; 9] = [
     keys!("fan-4", "Fan zone 4"),
 ];
 
+/// The events whose effects the light effect settings set, in their order.
+const EVENTS: [Keys; 4] = [
+    keys!("event.notification", "Notifications"),
+    keys!("event.alarm", "Alarms"),
+    keys!("event.call", "Incoming calls"),
+    keys!("event.charging", "Charging"),
+];
+
 const ZONES_SEPARATE: &str = "lights.fan.separate";
+const EFFECT_SETTINGS: &str = "lights.effects";
 
 /// The lights as the page last set them, and the LEDs on the phone.
 pub(super) struct State {
@@ -226,6 +239,15 @@ fn to_hsv(color: u32) -> [f32; 3] {
     [h, s, max]
 }
 
+/// A notification effect's duration, as its row and dialog say it.
+fn duration(seconds: u32) -> String {
+    match seconds {
+        seconds if seconds < 60 => format!("{seconds} seconds"),
+        60 => "1 minute".to_owned(),
+        seconds => format!("{} minutes", seconds / 60),
+    }
+}
+
 fn clear(rgb: u32) -> Hsla {
     let mut color: Hsla = solid(rgb);
     color.a = 0.0;
@@ -238,6 +260,22 @@ impl Settings {
         let live = layer.live();
         let now = Instant::now();
         let mut parts = Vec::new();
+        if !state.leds.is_empty() {
+            let row = self
+                .row(
+                    EFFECT_SETTINGS,
+                    Some(Icon::Light),
+                    "Light effect settings",
+                    Some("Notifications, alarms, calls, charging".into()),
+                    (true, true),
+                )
+                .child(self.chevron());
+            parts.push(
+                island(&self.look).child(self.live(row, live, cx, |this, window, cx| {
+                    this.open(Screen::LightEffects, window, cx)
+                })),
+            );
+        }
         for keys in LIGHTS
             .iter()
             .filter(|keys| !lights::is_fan_zone(keys.light))
@@ -289,6 +327,19 @@ impl Settings {
                         .child(self.light_island(zone, live && separate, now, cx)),
                 );
             }
+        }
+        parts
+    }
+
+    /// The light effect settings: for each event, the effect every light
+    /// shows while it goes on. A call comes before an alarm, an alarm before
+    /// a notification, and those before charging.
+    pub(super) fn light_effects_screen(&self, layer: Layer, cx: &mut Context<Self>) -> Vec<Div> {
+        let live = layer.live();
+        let now = Instant::now();
+        let mut parts = vec![self.chip_row("While these happen, every light shows their effect")];
+        for keys in &EVENTS {
+            parts.push(self.light_island(keys, live, now, cx));
         }
         parts
     }
@@ -362,6 +413,7 @@ impl Settings {
         }
         // The controls answer only while the light is on
         let live = live && on && open;
+        let event = keys.light.starts_with(lights::EVENT);
         let mut block = div()
             .flex()
             .flex_col()
@@ -395,7 +447,7 @@ impl Settings {
                         .position(|effect| *effect == light.effect)
                         .unwrap_or(0),
                     live,
-                    (false, light.effect == Effect::Solid),
+                    (false, light.effect == Effect::Solid && !event),
                     cx,
                     Rc::new(move |this, option, _, cx| {
                         let effect = Effect::ALL[option.min(Effect::ALL.len() - 1)];
@@ -416,13 +468,16 @@ impl Settings {
                 format!("{:.1} s", 2.0 * half as f32 / 1000.0).into(),
                 light.speed,
                 live,
-                (false, true),
+                (false, !event),
                 cx,
                 Rc::new(move |this, speed, done, cx| {
                     let speed = speed.clamp(0.0, 1.0);
                     this.slide_light(keys.light, |light| light.speed = speed, done, cx)
                 }),
             ));
+        }
+        if event {
+            block = self.event_rows(block, keys, light, live, cx);
         }
         island.child(
             div()
@@ -431,6 +486,96 @@ impl Settings {
                 .opacity(opened * lerp(FAINT, 1.0, lit))
                 .child(block),
         )
+    }
+
+    /// An event's own rows: the lights its effect shows on, and for a
+    /// notification how long it shows.
+    fn event_rows(
+        &self,
+        mut block: Div,
+        keys: &'static Keys,
+        light: Light,
+        live: bool,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let present: Vec<usize> = (0..lights::GROUPS.len())
+            .filter(|&bit| self.lights.has(lights::GROUPS[bit].0))
+            .collect();
+        let chosen: Vec<&str> = present
+            .iter()
+            .filter(|&&bit| light.groups & 1 << bit != 0)
+            .map(|&bit| lights::GROUPS[bit].1)
+            .collect();
+        let summary = if chosen.len() == present.len() {
+            "All".to_owned()
+        } else if chosen.is_empty() {
+            "None".to_owned()
+        } else {
+            chosen.join(", ")
+        };
+        let notification = keys.light == "event.notification";
+        let row = self
+            .row(keys.lights, None, "Lights", None, (false, !notification))
+            .child(self.value(summary))
+            .child(self.chevron());
+        block = block
+            .child(self.separator(0.))
+            .child(self.live(row, live, cx, move |this, _, cx| {
+                let light = this.lights.lights.get(keys.light);
+                let present = present.clone();
+                this.show(
+                    Dialog::PickMany {
+                        title: "Lights".into(),
+                        options: present
+                            .iter()
+                            .map(|&bit| lights::GROUPS[bit].1.into())
+                            .collect(),
+                        picked: present
+                            .iter()
+                            .map(|&bit| light.groups & 1 << bit != 0)
+                            .collect(),
+                        pick: Rc::new(move |this, picked, cx| {
+                            let groups = present
+                                .iter()
+                                .zip(picked)
+                                .filter(|(_, on)| **on)
+                                .fold(0, |groups, (&bit, _)| groups | 1 << bit);
+                            this.change_light(keys.light, |light| light.groups = groups, cx)
+                        }),
+                    },
+                    cx,
+                );
+            }));
+        if notification {
+            let row = self
+                .row(keys.duration, None, "Duration", None, (false, true))
+                .child(self.value(duration(light.seconds)))
+                .child(self.chevron());
+            block = block
+                .child(self.separator(0.))
+                .child(self.live(row, live, cx, move |this, _, cx| {
+                    let seconds = this.lights.lights.get(keys.light).seconds;
+                    this.show(
+                        Dialog::Pick {
+                            title: "Duration".into(),
+                            options: lights::NOTIFICATION_SECONDS
+                                .iter()
+                                .map(|&seconds| duration(seconds).into())
+                                .collect(),
+                            picked: lights::NOTIFICATION_SECONDS
+                                .iter()
+                                .position(|&each| each == seconds)
+                                .unwrap_or(1),
+                            pick: Rc::new(move |this, option, _, cx| {
+                                let seconds = lights::NOTIFICATION_SECONDS[option];
+                                this.change_light(keys.light, |light| light.seconds = seconds, cx)
+                            }),
+                        },
+                        cx,
+                    );
+                }));
+        }
+        block
     }
 
     /// Start `light`'s `flip` toward `to`.
@@ -777,7 +922,7 @@ impl Settings {
         let state = &mut self.lights;
         let mut setting = state.lights.get(light);
         change(&mut setting);
-        state.lights.lights.insert(light.to_owned(), setting);
+        state.lights.put(light, setting);
         if light == FAN && state.lights.fan_zones_separate {
             for zone in LIGHTS.iter().filter(|keys| lights::is_fan_zone(keys.light)) {
                 state.lights.lights.insert(zone.light.to_owned(), setting);
@@ -839,7 +984,7 @@ mod tests {
     #[test]
     fn keys_are_unique() {
         let mut keys = std::collections::HashSet::new();
-        for light in &LIGHTS {
+        for light in LIGHTS.iter().chain(&EVENTS) {
             for key in [
                 light.on,
                 light.swatches,

@@ -19,6 +19,7 @@ pub enum Icon {
     Bell,
     Block,
     Bluetooth,
+    Check,
     Chevron,
     Close,
     Computer,
@@ -83,7 +84,7 @@ pub enum Icon {
     WifiWeak,
 }
 
-const ALL: [Icon; 74] = [
+const ALL: [Icon; 75] = [
     Icon::Accessibility,
     Icon::Airplane,
     Icon::Alert,
@@ -96,6 +97,7 @@ const ALL: [Icon; 74] = [
     Icon::Bell,
     Icon::Block,
     Icon::Bluetooth,
+    Icon::Check,
     Icon::Chevron,
     Icon::Close,
     Icon::Computer,
@@ -175,6 +177,7 @@ impl Icon {
             Icon::Bell => "bell",
             Icon::Block => "block",
             Icon::Bluetooth => "bluetooth",
+            Icon::Check => "check",
             Icon::Chevron => "chevron",
             Icon::Close => "close",
             Icon::Computer => "computer",
@@ -269,6 +272,7 @@ impl Icon {
             }
             Icon::Block => r#"<circle cx="12" cy="12" r="8.5"/><path d="M6 6l12 12"/>"#,
             Icon::Bluetooth => r#"<path d="M7 7l10 10-5 4V3l5 4L7 17"/>"#,
+            Icon::Check => r#"<path d="M5 12.5l4.5 4.5L19 7.5"/>"#,
             Icon::Chevron => r#"<path d="M9 5l7 7-7 7"/>"#,
             Icon::Close => r#"<path d="M6 6l12 12M18 6L6 18"/>"#,
             Icon::Computer => {

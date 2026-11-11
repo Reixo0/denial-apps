@@ -19,6 +19,10 @@ const PREFIX: &str = "rgb:";
 
 pub const FAN: &str = "fan";
 
+/// Event effects are named `event.<event>`: every light shows one while its
+/// event goes on (Denial's shell plays them).
+pub const EVENT: &str = "event.";
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Effect {
     Solid,
@@ -48,7 +52,25 @@ pub struct Light {
     pub effect: Effect,
     /// How fast breathing and blinking go: 0 slowest to 1 fastest.
     pub speed: f32,
+    /// An event's effect: the lights it shows on, by [`GROUPS`] bit.
+    pub groups: u8,
+    /// A notification's effect: how long it shows, in seconds.
+    pub seconds: u32,
 }
+
+/// The lights an event's effect can show on: the fan stands for all its
+/// zones.
+pub const GROUPS: [(&str, &str); 5] = [
+    ("logo", "RedMagic logo"),
+    ("gamemode", "Game mode light"),
+    ("trigger-left", "Left trigger"),
+    ("trigger-right", "Right trigger"),
+    (FAN, "Fan"),
+];
+const ALL_GROUPS: u8 = (1 << GROUPS.len()) - 1;
+
+/// How long a notification's effect can show, in seconds.
+pub const NOTIFICATION_SECONDS: [u32; 6] = [10, 30, 60, 120, 300, 600];
 
 impl Default for Light {
     fn default() -> Self {
@@ -58,6 +80,8 @@ impl Default for Light {
             brightness: 1.0,
             effect: Effect::Solid,
             speed: 0.5,
+            groups: ALL_GROUPS,
+            seconds: 30,
         }
     }
 }
@@ -70,6 +94,13 @@ impl Light {
             "brightness": self.brightness,
             "effect": self.effect.word(),
             "speed": self.speed,
+            "lights": GROUPS
+                .iter()
+                .enumerate()
+                .filter(|(bit, _)| self.groups & 1 << bit != 0)
+                .map(|(_, (name, _))| *name)
+                .collect::<Vec<_>>(),
+            "seconds": self.seconds,
         })
     }
 
@@ -85,6 +116,16 @@ impl Light {
         if let Some(speed) = value["speed"].as_f64() {
             light.speed = (speed as f32).clamp(0.0, 1.0);
         }
+        if let Some(names) = value["lights"].as_array() {
+            light.groups = GROUPS
+                .iter()
+                .enumerate()
+                .filter(|(_, (name, _))| names.iter().any(|named| named.as_str() == Some(name)))
+                .fold(0, |groups, (bit, _)| groups | 1 << bit);
+        }
+        if let Some(seconds) = value["seconds"].as_u64() {
+            light.seconds = seconds.clamp(1, 3600) as u32;
+        }
         light.effect = Effect::ALL
             .into_iter()
             .find(|effect| value["effect"].as_str() == Some(effect.word()))
@@ -99,11 +140,26 @@ pub struct Lights {
     /// zones together) and fan-1 to fan-4 (zones on their own).
     pub lights: BTreeMap<String, Light>,
     pub fan_zones_separate: bool,
+    /// By event: notification, alarm, call and charging.
+    pub events: BTreeMap<String, Light>,
 }
 
 impl Lights {
     pub fn get(&self, light: &str) -> Light {
-        self.lights.get(light).copied().unwrap_or_default()
+        match light.strip_prefix(EVENT) {
+            Some(event) => self.events.get(event),
+            None => self.lights.get(light),
+        }
+        .copied()
+        .unwrap_or_default()
+    }
+
+    /// Keep `setting` for `light`, or for the event it names.
+    pub fn put(&mut self, light: &str, setting: Light) {
+        match light.strip_prefix(EVENT) {
+            Some(event) => self.events.insert(event.to_owned(), setting),
+            None => self.lights.insert(light.to_owned(), setting),
+        };
     }
 
     /// What `led` shows: a fan zone takes the fan's setting unless the zones
@@ -123,9 +179,8 @@ impl Lights {
         let Ok(value) = serde_json::from_str::<Value>(&text) else {
             return Lights::default();
         };
-        Lights {
-            fan_zones_separate: value["fanZonesSeparate"].as_bool().unwrap_or(false),
-            lights: value["lights"]
+        let by_name = |key: &str| -> BTreeMap<String, Light> {
+            value[key]
                 .as_object()
                 .map(|lights| {
                     lights
@@ -133,17 +188,27 @@ impl Lights {
                         .map(|(name, light)| (name.clone(), Light::from_json(light)))
                         .collect()
                 })
-                .unwrap_or_default(),
+                .unwrap_or_default()
+        };
+        Lights {
+            fan_zones_separate: value["fanZonesSeparate"].as_bool().unwrap_or(false),
+            lights: by_name("lights"),
+            events: by_name("events"),
         }
     }
 
     pub fn save(&self) -> io::Result<()> {
-        let lights: Map<String, Value> = self
-            .lights
-            .iter()
-            .map(|(name, light)| (name.clone(), light.to_json()))
-            .collect();
-        let value = json!({ "fanZonesSeparate": self.fan_zones_separate, "lights": lights });
+        let by_name = |lights: &BTreeMap<String, Light>| -> Map<String, Value> {
+            lights
+                .iter()
+                .map(|(name, light)| (name.clone(), light.to_json()))
+                .collect()
+        };
+        let value = json!({
+            "fanZonesSeparate": self.fan_zones_separate,
+            "lights": by_name(&self.lights),
+            "events": by_name(&self.events),
+        });
         let file = file();
         if let Some(dir) = file.parent() {
             fs::create_dir_all(dir)?;

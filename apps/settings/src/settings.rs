@@ -89,6 +89,8 @@ enum Screen {
     AndroidApp {
         package: SharedString,
     },
+    /// The lights' effects for events, from the Lights page.
+    LightEffects,
 }
 
 impl PartialEq for Screen {
@@ -99,7 +101,8 @@ impl PartialEq for Screen {
             | (Screen::Wallpapers, Screen::Wallpapers)
             | (Screen::MonitorWallpapers, Screen::MonitorWallpapers)
             | (Screen::Fingers, Screen::Fingers)
-            | (Screen::Zones, Screen::Zones) => true,
+            | (Screen::Zones, Screen::Zones)
+            | (Screen::LightEffects, Screen::LightEffects) => true,
             (Screen::Page(a), Screen::Page(b)) => std::ptr::eq(*a, *b),
             (Screen::Network { id: a, .. }, Screen::Network { id: b, .. }) => a == b,
             (Screen::Device { path: a }, Screen::Device { path: b }) => a == b,
@@ -123,6 +126,7 @@ impl Screen {
             Screen::Fingers => "fingers",
             Screen::Zones => "zones",
             Screen::AndroidApp { .. } => "android-app",
+            Screen::LightEffects => "light-effects",
         }
     }
 
@@ -272,6 +276,9 @@ impl Keyboard {
 
 /// What runs when one of a dialog's options is picked.
 type OnPick = Rc<dyn Fn(&mut Settings, usize, &mut Window, &mut Context<Settings>)>;
+/// What runs when an option of a many-pick dialog is ticked or unticked:
+/// with every option's mark after the change.
+type OnPickMany = Rc<dyn Fn(&mut Settings, &[bool], &mut Context<Settings>)>;
 /// What runs when a dialog is confirmed.
 type OnConfirm = Rc<dyn Fn(&mut Settings, &mut Window, &mut Context<Settings>)>;
 
@@ -284,6 +291,14 @@ enum Dialog {
         options: Vec<SharedString>,
         picked: usize,
         pick: OnPick,
+    },
+    /// Options to tick any of: it stays open, each tick counting at once.
+    /// At least one stays ticked.
+    PickMany {
+        title: SharedString,
+        options: Vec<SharedString>,
+        picked: Vec<bool>,
+        pick: OnPickMany,
     },
     /// Something that cannot be undone.
     Confirm {
@@ -1159,6 +1174,7 @@ impl Settings {
             }
             Screen::Fingers => catalog::page("security").map_or(Screen::Home, Screen::Page),
             Screen::Zones => catalog::page("time").map_or(Screen::Home, Screen::Page),
+            Screen::LightEffects => catalog::page("lights").map_or(Screen::Home, Screen::Page),
             Screen::AndroidApp { .. } => {
                 catalog::page("android").map_or(Screen::Home, Screen::Page)
             }
@@ -1360,6 +1376,7 @@ impl Settings {
             Screen::Fingers => self.fingers_screen(layer, cx),
             Screen::Zones => self.zones_screen(layer, cx),
             Screen::AndroidApp { package } => self.android_app_screen(package, layer, cx),
+            Screen::LightEffects => self.light_effects_screen(layer, cx),
         };
         let content = div()
             .id(screen.key())
@@ -1486,6 +1503,7 @@ impl Settings {
             Screen::Home => return self.home_top(layer, cx),
             Screen::Page(page) => page.title.into(),
             Screen::SavedNetworks => "Saved networks".into(),
+            Screen::LightEffects => "Light effect settings".into(),
             Screen::Network { id, .. } => self
                 .wifi
                 .state

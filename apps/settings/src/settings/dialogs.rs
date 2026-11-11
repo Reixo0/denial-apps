@@ -8,7 +8,7 @@ use std::time::Instant;
 use denial_look::mobile::TOUCH;
 use denial_look::{Tween, decelerate, floating, motion};
 use denial_look_gpui::input::TextInput;
-use denial_look_gpui::{color, control_radius, dp, island, say, solid};
+use denial_look_gpui::{Icon, color, control_radius, dp, icon, island, say, solid};
 use gpui::{
     Context, Div, Entity, Focusable, FontWeight, SharedString, Stateful, Window, div, prelude::*,
     px,
@@ -74,6 +74,35 @@ impl Settings {
                         .child(self.radio(ix == *picked))
                         .child(say(option.clone()));
                     self.pressable(row, cx, move |this, window, cx| this.pick(ix, window, cx))
+                });
+                island
+                    .p(dp(6.))
+                    .child(
+                        self.dialog_title(title.clone())
+                            .px(dp(12.))
+                            .pt(dp(12.))
+                            .pb(dp(8.)),
+                    )
+                    .children(rows)
+            }
+            Dialog::PickMany {
+                title,
+                options,
+                picked,
+                ..
+            } => {
+                let rows = options.iter().enumerate().map(|(ix, option)| {
+                    let row = div()
+                        .id(ix)
+                        .h(dp(TOUCH))
+                        .flex()
+                        .items_center()
+                        .gap(dp(ROW_GAP))
+                        .px(dp(12.))
+                        .rounded(control_radius(&self.look))
+                        .child(self.check(picked.get(ix).copied().unwrap_or(false)))
+                        .child(say(option.clone()));
+                    self.pressable(row, cx, move |this, _, cx| this.tick(ix, cx))
                 });
                 island
                     .p(dp(6.))
@@ -410,6 +439,48 @@ impl Settings {
             })
     }
 
+    /// A tick mark: a rounded square, filled with a check when `on`.
+    pub(super) fn check(&self, on: bool) -> Div {
+        let ink = if on {
+            self.look.accent
+        } else {
+            self.look.palette.secondary
+        };
+        div()
+            .flex_none()
+            .size(dp(22.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(dp(6.))
+            .border(dp(2.))
+            .border_color(solid(ink))
+            .when(on, |check| {
+                check
+                    .bg(solid(ink))
+                    .child(icon(Icon::Check, dp(16.), solid(self.look.on_accent)))
+            })
+    }
+
+    /// Ticks or unticks option `option` of the many-pick dialog, which stays
+    /// open; the last ticked option stays.
+    fn tick(&mut self, option: usize, cx: &mut Context<Self>) {
+        let Some((Dialog::PickMany { picked, pick, .. }, _)) = self.dialog.as_mut() else {
+            return;
+        };
+        let Some(mark) = picked.get_mut(option) else {
+            return;
+        };
+        if *mark && picked.iter().filter(|mark| **mark).count() == 1 {
+            return;
+        }
+        let mark = &mut picked[option];
+        *mark = !*mark;
+        let (picked, pick) = (picked.clone(), pick.clone());
+        pick(self, &picked, cx);
+        cx.notify();
+    }
+
     /// Picks option `option` of the pick dialog, which closes.
     fn pick(&mut self, option: usize, window: &mut Window, cx: &mut Context<Self>) {
         if let Some((Dialog::Pick { pick, .. }, _)) = self.dialog.take() {
@@ -427,7 +498,7 @@ impl Settings {
         };
         let password = self.password.read(cx).text().to_owned();
         match dialog {
-            Dialog::Pick { .. } => {}
+            Dialog::Pick { .. } | Dialog::PickMany { .. } => {}
             Dialog::Confirm { confirm, .. } => {
                 self.dismiss(window, cx);
                 confirm(self, window, cx);
