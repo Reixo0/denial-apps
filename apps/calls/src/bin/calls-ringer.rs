@@ -470,10 +470,14 @@ fn follow(calls: Vec<Call>, ringing: &mut Option<Arc<AtomicBool>>) {
     }
 }
 
-/// Plays the ringtone over and over until told to stop.
+/// Plays the ringtone over and over until told to stop, as the Ringtone role
+/// so that it follows the ringtone volume rather than the media one.
 fn ring(stop: &AtomicBool) {
     while !stop.load(Ordering::Relaxed) {
-        let mut player = match Command::new("pw-play").arg(RINGTONE).spawn() {
+        let mut player = match Command::new("pw-play")
+            .args(["--media-role=Ringtone", RINGTONE])
+            .spawn()
+        {
             Ok(player) => player,
             Err(error) => return eprintln!("calls-ringer: pw-play: {error}"),
         };
