@@ -33,6 +33,7 @@ pub enum Icon {
     HangUp,
     Headphones,
     Hold,
+    Home,
     Hotspot,
     Incoming,
     Info,
@@ -82,7 +83,7 @@ pub enum Icon {
     WifiWeak,
 }
 
-const ALL: [Icon; 73] = [
+const ALL: [Icon; 74] = [
     Icon::Accessibility,
     Icon::Airplane,
     Icon::Alert,
@@ -109,6 +110,7 @@ const ALL: [Icon; 73] = [
     Icon::HangUp,
     Icon::Headphones,
     Icon::Hold,
+    Icon::Home,
     Icon::Hotspot,
     Icon::Incoming,
     Icon::Info,
@@ -187,6 +189,7 @@ impl Icon {
             Icon::HangUp => "hang-up",
             Icon::Headphones => "headphones",
             Icon::Hold => "hold",
+            Icon::Home => "home",
             Icon::Hotspot => "hotspot",
             Icon::Incoming => "incoming",
             Icon::Info => "info",
@@ -298,6 +301,7 @@ impl Icon {
                 r#"<path d="M4 17v-4a8 8 0 0116 0v4"/><rect x="3.5" y="14" width="4" height="6.5" rx="1.5"/><rect x="16.5" y="14" width="4" height="6.5" rx="1.5"/>"#
             }
             Icon::Hold => r#"<path d="M9 5v14M15 5v14"/>"#,
+            Icon::Home => r#"<path d="M4 10.5L12 4l8 6.5V19a1 1 0 01-1 1h-4.5v-5.5h-5V20H5a1 1 0 01-1-1z"/>"#,
             Icon::Hotspot => {
                 r#"<circle cx="12" cy="12" r="1.5"/><path d="M8.5 15.5a5 5 0 010-7M15.5 8.5a5 5 0 010 7M5.6 18.4a9 9 0 010-12.8M18.4 5.6a9 9 0 010 12.8"/>"#
             }

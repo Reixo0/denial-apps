@@ -509,6 +509,19 @@ pub static GROUPS: &[Group] = &[
                 ]),
             },
             Page {
+                id: "homescreen",
+                title: "Home",
+                icon: Icon::Home,
+                summary: "Home screen",
+                content: Content::Settings(&[lead(&[item(
+                    "homescreen.rotate",
+                    "Rotate the home and lock screens",
+                    Kind::Toggle(true),
+                )
+                .detail("Turn with the phone when auto-rotate is on; apps always do")
+                .denial("home.rotate")])]),
+            },
+            Page {
                 id: "security",
                 title: "Lock screen and security",
                 icon: Icon::Lock,
