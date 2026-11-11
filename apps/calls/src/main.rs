@@ -4,6 +4,7 @@ mod dmail;
 mod instance;
 mod local;
 mod people;
+mod session;
 mod words;
 
 use futures_lite::future;

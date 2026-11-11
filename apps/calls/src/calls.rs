@@ -31,7 +31,9 @@ use gpui::{
 };
 
 use crate::data::{self, Call, Direction};
-use crate::dmail::{CallAudio1Proxy, CallRow, NotificationsProxy, Sensors1Proxy, Voice1Proxy};
+use crate::dmail::{
+    CallAudio1Proxy, CallRow, LoggedRow, NotificationsProxy, Sensors1Proxy, Voice1Proxy,
+};
 use crate::local::{CallLog, Favourites};
 use crate::people::People;
 
@@ -42,7 +44,14 @@ const STAGGERED: usize = 12;
 /// Emoji the UI font lacks are drawn from this font first, as in Messages.
 const EMOJI_FONT: &str = "Noto Color Emoji";
 /// The id of the first call in the log.
-const FIRST_ID: u64 = 1;
+const FIRST_ID: u64 = 1 << 56;
+
+/// Ids of the calls this app logged itself, before dmail kept the log; kept
+/// apart from dmail's ids.
+const LEGACY_FIRST_ID: u64 = 1 << 48;
+
+/// How many of dmail's logged calls Recents shows.
+const LOG_LIMIT: u32 = 500;
 /// A call that ended stays on screen this long.
 const ENDED_FOR: Duration = Duration::from_millis(1200);
 /// Recent calls shown on a contact.
@@ -317,8 +326,6 @@ struct Live {
     number: String,
     incoming: bool,
     phase: Phase,
-    /// Unix time it started ringing.
-    time: i64,
     muted: bool,
     speaker: bool,
     held: bool,
@@ -390,11 +397,13 @@ pub struct Calls {
     /// The contacts folder, and what is in it.
     folder: Option<PathBuf>,
     people: People,
-    /// The call log, newest first.
+    /// The call log, newest first: dmail's, then `legacy`.
     log: Vec<Call>,
-    /// The real calls of `log`, on the phone.
+    /// The calls this app logged itself before dmail kept the log.
+    legacy: Vec<Call>,
     saved: CallLog,
     voice: Option<Voice1Proxy<'static>>,
+    _follow_log: Option<Task<()>>,
     audio: Option<CallAudio1Proxy<'static>>,
     _follow_voice: Task<()>,
     /// Something covers the screen: a cheek must not press the call's controls.
@@ -413,6 +422,10 @@ pub struct Calls {
     /// The number called last, which Call brings back on an empty keypad.
     last_dialled: Option<String>,
     live: Option<Live>,
+    /// The session is locked. Calls then shows over the lock screen only for
+    /// a call, and only the call.
+    locked: bool,
+    _follow_lock: Task<()>,
     overlay: Option<(Overlay, Tween)>,
     /// A short note above the bottom zone, until its task hides it.
     notice: Option<(SharedString, Tween, Task<()>)>,
@@ -460,8 +473,9 @@ impl Calls {
         let folder = Contacts::folder();
         let people = People::read(folder.as_deref());
         let saved = CallLog::new();
-        let log = saved.load(FIRST_ID);
-        let next_id = FIRST_ID + log.len() as u64;
+        let legacy = saved.load(LEGACY_FIRST_ID);
+        let log = legacy.clone();
+        let next_id = FIRST_ID;
         let (screen, typed) = match number {
             Some(number) => (Screen::Keypad, keypad::keyable(&number)),
             None => (Screen::Recents, String::new()),
@@ -493,8 +507,16 @@ impl Calls {
             folder,
             people,
             log,
+            legacy,
             saved,
             voice: None,
+            _follow_log: None,
+            locked: false,
+            _follow_lock: cx.spawn_in(window, async move |this, cx| {
+                if let Err(error) = Self::follow_lock(&this, cx).await {
+                    eprintln!("calls: following the lock: {error}");
+                }
+            }),
             audio: None,
             _follow_voice: cx.spawn_in(window, async move |this, cx| {
                 Self::follow_voice(this, cx).await
@@ -641,6 +663,7 @@ impl Calls {
         let mut changes = voice.receive_calls_changed().await;
         let first = voice.calls().await.unwrap_or_default();
         let taken = this.update_in(cx, |view, window, cx| {
+            view.follow_log(voice.clone(), window, cx);
             view.voice = Some(voice);
             view.audio = Some(audio);
             view.sync(first, window, cx);
@@ -655,6 +678,67 @@ impl Calls {
                 return;
             }
         }
+    }
+
+    /// Follows whether the session is locked.
+    async fn follow_lock(this: &WeakEntity<Self>, cx: &mut AsyncWindowContext) -> gpui::Result<()> {
+        let bus = zbus::Connection::system().await?;
+        let session = crate::session::graphical(&bus).await?;
+        let mut changes = session.receive_locked_hint_changed().await;
+        loop {
+            let locked = session.locked_hint().await?;
+            this.update_in(cx, |view, _, cx| {
+                view.locked = locked;
+                cx.notify();
+            })?;
+            if changes.next().await.is_none() {
+                return Ok(());
+            }
+        }
+    }
+
+    /// Reads dmail's call log, and again each time a call goes in or out of
+    /// it: dmail logs every call that ends, whether Calls runs or not.
+    fn follow_log(
+        &mut self,
+        voice: Voice1Proxy<'static>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self._follow_log = Some(cx.spawn_in(window, async move |this, cx| {
+            let streams = async {
+                let logged = voice.receive_call_logged().await?.map(|_| ());
+                let deleted = voice.receive_call_log_deleted().await?.map(|_| ());
+                zbus::Result::Ok(logged.or(deleted))
+            };
+            let mut changes = match streams.await {
+                Ok(changes) => changes,
+                Err(error) => return eprintln!("calls: following the call log: {error}"),
+            };
+            loop {
+                match voice.list_call_log(0, LOG_LIMIT).await {
+                    Ok(rows) => {
+                        if this
+                            .update(cx, |view, cx| view.set_logged(&rows, cx))
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                    Err(error) => eprintln!("calls: reading the call log: {error}"),
+                }
+                if changes.next().await.is_none() {
+                    return;
+                }
+            }
+        }));
+    }
+
+    fn set_logged(&mut self, rows: &[LoggedRow], cx: &mut Context<Self>) {
+        self.log = rows.iter().filter_map(Call::logged).collect();
+        self.log.extend(self.legacy.iter().cloned());
+        self.recents.reset(0);
+        cx.notify();
     }
 
     /// Follows the proximity sensor, for as long as the window lives.
@@ -688,12 +772,8 @@ impl Calls {
             let Some(row) = rows.iter().find(|row| row.3 != "ending") else {
                 return;
             };
-            let number = if row.1.is_empty() {
-                tr("No caller ID").to_owned()
-            } else {
-                row.1.clone()
-            };
-            self.ring(number, row.2 == "in", Some(row.0), window, cx);
+            // Empty when withheld: People names it Unknown caller.
+            self.ring(row.1.clone(), row.2 == "in", Some(row.0), window, cx);
             return self.sync(rows, window, cx);
         };
         // A call placed here can show in the list before Dial answers.
@@ -794,7 +874,6 @@ impl Calls {
             number,
             incoming,
             phase: Phase::Ringing(Instant::now()),
-            time: data::now(),
             muted: false,
             speaker: false,
             held: false,
@@ -955,8 +1034,8 @@ impl Calls {
         .detach();
     }
 
-    /// The call is over, as `direction` says: it goes in the log and shows
-    /// that it ended until its clock closes it.
+    /// The call is over, as `direction` says: it shows that it ended until
+    /// its clock closes it. dmail logs it.
     fn finish(&mut self, direction: Direction, cx: &mut Context<Self>) {
         let now = Instant::now();
         let Some(live) = self.live.as_mut().filter(|live| !live.ended()) else {
@@ -965,16 +1044,7 @@ impl Calls {
         let talked = live.talked(now);
         live.phase = Phase::Ended(now, talked);
         live.keypad = false;
-        let call = Call {
-            id: live.id,
-            number: live.number.clone(),
-            direction,
-            time: live.time,
-            talked,
-        };
-        let missed = (direction == Direction::Missed).then(|| call.number.clone());
-        self.log.insert(0, call);
-        self.saved.save(&self.log);
+        let missed = (direction == Direction::Missed).then(|| live.number.clone());
         if let Some(number) = missed {
             self.notify_missed(&number, cx);
         }
@@ -988,6 +1058,10 @@ impl Calls {
         self.trail.retain(|screen| *screen != Screen::Call);
         if self.screen == Screen::Call {
             self.go_back(window, cx);
+        }
+        // Over the lock screen only the call shows: with it gone, Calls leaves.
+        if self.locked {
+            window.remove_window();
         }
         cx.notify();
     }
@@ -1038,7 +1112,18 @@ impl Calls {
 
     fn delete_call(&mut self, id: u64, cx: &mut Context<Self>) {
         self.log.retain(|call| call.id != id);
-        self.saved.save(&self.log);
+        if id >= LEGACY_FIRST_ID {
+            self.legacy.retain(|call| call.id != id);
+            self.saved.save(&self.legacy);
+        } else if let Some(voice) = self.voice.clone() {
+            // dmail's CallLogDeleted reads the log again.
+            cx.background_spawn(async move {
+                if let Err(error) = voice.delete_logged_call(id).await {
+                    eprintln!("calls: deleting a logged call: {error}");
+                }
+            })
+            .detach();
+        }
         self.recents.reset(0);
         self.note(tr("Deleted"), cx);
     }
@@ -1115,6 +1200,10 @@ impl Calls {
     /// lets go; then the screen pops; on a tab, the window closes. A call
     /// goes on behind the screens it goes back to.
     fn back(&mut self, _: &Back, window: &mut Window, cx: &mut Context<Self>) {
+        // Over the lock screen only the call shows.
+        if self.locked {
+            return;
+        }
         let typing = self.search.focus_handle(cx).is_focused(window);
         if self.overlay.is_some() {
             self.dismiss(cx);

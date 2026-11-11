@@ -7,6 +7,11 @@ use zbus::proxy;
 /// alerting, incoming, waiting, active, held, ending), connected time.
 pub type CallRow = (u8, String, String, String, i64);
 
+/// A call of dmail's log: id, number (empty when withheld), direction (`in`,
+/// `out`), outcome (answered, missed, declined, unanswered), and the Unix
+/// times it started, connected (0 if it never did) and ended.
+pub type LoggedRow = (u64, String, String, String, i64, i64, i64);
+
 #[proxy(
     interface = "org.dmail.Voice1",
     default_service = "org.dmail",
@@ -25,6 +30,17 @@ pub trait Voice1 {
     fn hangup(&self, id: u8) -> zbus::Result<()>;
 
     fn send_dtmf(&self, id: u8, digits: &str) -> zbus::Result<()>;
+
+    /// Newest first, ids below `before` (0 for the newest).
+    fn list_call_log(&self, before: u64, limit: u32) -> zbus::Result<Vec<LoggedRow>>;
+
+    fn delete_logged_call(&self, id: u64) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    fn call_logged(&self, id: u64) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    fn call_log_deleted(&self, id: u64) -> zbus::Result<()>;
 }
 
 #[proxy(

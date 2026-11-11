@@ -24,7 +24,7 @@ pub static CHINESE: &[(&str, &str)] = &[
     ("On hold · {clock}", "保持中 · {clock}"),
     ("{clock} · Muted", "{clock} · 已静音"),
     ("Already in a call", "已在通话中"),
-    ("No caller ID", "未显示号码"),
+    ("Unknown caller", "未知来电"),
     ("The modem is not available", "调制解调器不可用"),
     ("The call could not be placed", "无法拨打电话"),
     ("The call could not be answered", "无法接听电话"),

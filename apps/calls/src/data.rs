@@ -25,6 +25,7 @@ impl Direction {
 }
 
 /// One call in the log.
+#[derive(Clone)]
 pub struct Call {
     pub id: u64,
     /// As dialled, or as the caller's number came in.
@@ -37,6 +38,30 @@ pub struct Call {
 }
 
 impl Call {
+    /// A call of dmail's log; None for a direction or outcome it doesn't know.
+    pub fn logged(row: &crate::dmail::LoggedRow) -> Option<Self> {
+        let (id, number, direction, outcome, started, connected, ended) = row;
+        let direction = match (direction.as_str(), outcome.as_str()) {
+            ("out", _) => Direction::Outgoing,
+            ("in", "answered") => Direction::Incoming,
+            ("in", "missed") => Direction::Missed,
+            ("in", "declined") => Direction::Declined,
+            _ => return None,
+        };
+        let talked = if *connected > 0 {
+            (ended - connected).max(0) as u64
+        } else {
+            0
+        };
+        Some(Self {
+            id: *id,
+            number: number.clone(),
+            direction,
+            time: *started,
+            talked,
+        })
+    }
+
     /// "Outgoing call, 4 min", "Missed call", as a call's history reads.
     pub fn summary(&self) -> String {
         match (self.direction, self.talked) {
