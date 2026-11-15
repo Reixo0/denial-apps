@@ -54,7 +54,6 @@ struct Keys {
     effect: &'static str,
     speed: &'static str,
     lights: &'static str,
-    duration: &'static str,
 }
 
 macro_rules! keys {
@@ -71,7 +70,6 @@ macro_rules! keys {
             effect: concat!("lights.", $light, ".effect"),
             speed: concat!("lights.", $light, ".speed"),
             lights: concat!("lights.", $light, ".lights"),
-            duration: concat!("lights.", $light, ".duration"),
         }
     };
 }
@@ -237,15 +235,6 @@ fn to_hsv(color: u32) -> [f32; 3] {
     };
     let s = if max == 0.0 { 0.0 } else { d / max };
     [h, s, max]
-}
-
-/// A notification effect's duration, as its row and dialog say it.
-fn duration(seconds: u32) -> String {
-    match seconds {
-        seconds if seconds < 60 => format!("{seconds} seconds"),
-        60 => "1 minute".to_owned(),
-        seconds => format!("{} minutes", seconds / 60),
-    }
 }
 
 fn clear(rgb: u32) -> Hsla {
@@ -488,8 +477,7 @@ impl Settings {
         )
     }
 
-    /// An event's own rows: the lights its effect shows on, and for a
-    /// notification how long it shows.
+    /// An event's own row: the lights its effect shows on.
     fn event_rows(
         &self,
         mut block: Div,
@@ -513,68 +501,39 @@ impl Settings {
         } else {
             chosen.join(", ")
         };
-        let notification = keys.light == "event.notification";
         let row = self
-            .row(keys.lights, None, "Lights", None, (false, !notification))
+            .row(keys.lights, None, "Lights", None, (false, true))
             .child(self.value(summary))
             .child(self.chevron());
-        block = block
-            .child(self.separator(0.))
-            .child(self.live(row, live, cx, move |this, _, cx| {
-                let light = this.lights.lights.get(keys.light);
-                let present = present.clone();
-                this.show(
-                    Dialog::PickMany {
-                        title: "Lights".into(),
-                        options: present
-                            .iter()
-                            .map(|&bit| lights::GROUPS[bit].1.into())
-                            .collect(),
-                        picked: present
-                            .iter()
-                            .map(|&bit| light.groups & 1 << bit != 0)
-                            .collect(),
-                        pick: Rc::new(move |this, picked, cx| {
-                            let groups = present
-                                .iter()
-                                .zip(picked)
-                                .filter(|(_, on)| **on)
-                                .fold(0, |groups, (&bit, _)| groups | 1 << bit);
-                            this.change_light(keys.light, |light| light.groups = groups, cx)
-                        }),
-                    },
-                    cx,
-                );
-            }));
-        if notification {
-            let row = self
-                .row(keys.duration, None, "Duration", None, (false, true))
-                .child(self.value(duration(light.seconds)))
-                .child(self.chevron());
-            block = block
+        block =
+            block
                 .child(self.separator(0.))
                 .child(self.live(row, live, cx, move |this, _, cx| {
-                    let seconds = this.lights.lights.get(keys.light).seconds;
+                    let light = this.lights.lights.get(keys.light);
+                    let present = present.clone();
                     this.show(
-                        Dialog::Pick {
-                            title: "Duration".into(),
-                            options: lights::NOTIFICATION_SECONDS
+                        Dialog::PickMany {
+                            title: "Lights".into(),
+                            options: present
                                 .iter()
-                                .map(|&seconds| duration(seconds).into())
+                                .map(|&bit| lights::GROUPS[bit].1.into())
                                 .collect(),
-                            picked: lights::NOTIFICATION_SECONDS
+                            picked: present
                                 .iter()
-                                .position(|&each| each == seconds)
-                                .unwrap_or(1),
-                            pick: Rc::new(move |this, option, _, cx| {
-                                let seconds = lights::NOTIFICATION_SECONDS[option];
-                                this.change_light(keys.light, |light| light.seconds = seconds, cx)
+                                .map(|&bit| light.groups & 1 << bit != 0)
+                                .collect(),
+                            pick: Rc::new(move |this, picked, cx| {
+                                let groups = present
+                                    .iter()
+                                    .zip(picked)
+                                    .filter(|(_, on)| **on)
+                                    .fold(0, |groups, (&bit, _)| groups | 1 << bit);
+                                this.change_light(keys.light, |light| light.groups = groups, cx)
                             }),
                         },
                         cx,
                     );
                 }));
-        }
         block
     }
 

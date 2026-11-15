@@ -54,8 +54,6 @@ pub struct Light {
     pub speed: f32,
     /// An event's effect: the lights it shows on, by [`GROUPS`] bit.
     pub groups: u8,
-    /// A notification's effect: how long it shows, in seconds.
-    pub seconds: u32,
 }
 
 /// The lights an event's effect can show on: the fan stands for all its
@@ -69,9 +67,6 @@ pub const GROUPS: [(&str, &str); 5] = [
 ];
 const ALL_GROUPS: u8 = (1 << GROUPS.len()) - 1;
 
-/// How long a notification's effect can show, in seconds.
-pub const NOTIFICATION_SECONDS: [u32; 6] = [10, 30, 60, 120, 300, 600];
-
 impl Default for Light {
     fn default() -> Self {
         Light {
@@ -81,7 +76,6 @@ impl Default for Light {
             effect: Effect::Solid,
             speed: 0.5,
             groups: ALL_GROUPS,
-            seconds: 30,
         }
     }
 }
@@ -100,7 +94,6 @@ impl Light {
                 .filter(|(bit, _)| self.groups & 1 << bit != 0)
                 .map(|(_, (name, _))| *name)
                 .collect::<Vec<_>>(),
-            "seconds": self.seconds,
         })
     }
 
@@ -122,9 +115,6 @@ impl Light {
                 .enumerate()
                 .filter(|(_, (name, _))| names.iter().any(|named| named.as_str() == Some(name)))
                 .fold(0, |groups, (bit, _)| groups | 1 << bit);
-        }
-        if let Some(seconds) = value["seconds"].as_u64() {
-            light.seconds = seconds.clamp(1, 3600) as u32;
         }
         light.effect = Effect::ALL
             .into_iter()
