@@ -23,6 +23,7 @@ use wayland_protocols_wlr::output_power_management::v1::client::{
 use denial_contacts::Contacts;
 use std::collections::HashMap;
 use zbus::zvariant::{OwnedObjectPath, Value};
+use zbus::proxy::{CacheProperties, PropertyStream};
 use zbus::{Connection, proxy};
 
 const RINGTONE: &str = "/usr/share/sounds/freedesktop/stereo/phone-incoming-call.oga";
@@ -143,7 +144,13 @@ enum Event {
 async fn run() -> zbus::Result<()> {
     let system = Connection::system().await?;
     let voice = Voice1Proxy::new(&system).await?;
-    let sensors = Sensors1Proxy::new(&system).await?;
+    // Claims go through a proxy that caches nothing: a caching one matches
+    // every steinerd property, and acceleration changes ~30 times a second
+    // whenever anything runs the accelerometer.
+    let sensors = Sensors1Proxy::builder(&system)
+        .cache_properties(CacheProperties::No)
+        .build()
+        .await?;
     let session = Connection::session().await?;
     let audio = CallAudio1Proxy::new(&session).await?;
     let app = AppProxy::new(&session).await?;
@@ -161,7 +168,8 @@ async fn run() -> zbus::Result<()> {
     let mut posted: Option<(u32, CallCard)> = None;
     let mut list_now: Vec<Call> = Vec::new();
     let mut calls = voice.receive_calls_changed().await;
-    let mut near_changes = sensors.receive_near_changed().await;
+    // Proximity is followed only during a call.
+    let mut near_changes: Option<PropertyStream<'static, bool>> = None;
     let mut speaker_changes = audio.receive_speaker_changed().await;
     let mut screen: Option<Screen> = None;
     let mut ringing: Option<Arc<AtomicBool>> = None;
@@ -198,7 +206,12 @@ async fn run() -> zbus::Result<()> {
                     // Only a report from this call counts as near.
                     near = false;
                     speaker = audio.speaker().await.unwrap_or(false);
+                    near_changes = None;
                     let claimed = if talking {
+                        match Sensors1Proxy::new(&system).await {
+                            Ok(proxy) => near_changes = Some(proxy.receive_near_changed().await),
+                            Err(error) => eprintln!("calls-ringer: proximity changes: {error}"),
+                        }
                         sensors.claim("proximity").await
                     } else {
                         sensors.release("proximity").await
@@ -273,8 +286,11 @@ async fn run() -> zbus::Result<()> {
                     },
                 ),
                 future::or(async {
-                    match near_changes.next().await {
-                        Some(change) => Event::Near(change.get().await.unwrap_or(false)),
+                    match near_changes.as_mut() {
+                        Some(changes) => match changes.next().await {
+                            Some(change) => Event::Near(change.get().await.unwrap_or(false)),
+                            None => future::pending().await,
+                        },
                         None => future::pending().await,
                     }
                 },
