@@ -513,13 +513,19 @@ pub static GROUPS: &[Group] = &[
                 title: "Home",
                 icon: Icon::Home,
                 summary: "Home screen",
-                content: Content::Settings(&[lead(&[item(
-                    "homescreen.rotate",
-                    "Rotate the home and lock screens",
-                    Kind::Toggle(true),
-                )
-                .detail("Turn with the phone when auto-rotate is on; apps always do")
-                .denial("home.rotate")])]),
+                content: Content::Settings(&[lead(&[
+                    item(
+                        "homescreen.rotate",
+                        "Rotate the home and lock screens",
+                        Kind::Toggle(true),
+                    )
+                    .detail("Turn with the phone when auto-rotate is on; apps always do")
+                    .denial("home.rotate"),
+                    item("homescreen.blur", "Blur strength", Kind::Slider(1.0))
+                        .detail("Everything that blurs")
+                        .from(Source::Range("home.blurStrength", 0.0, 1.0))
+                        .only("style.material", &[0, 1]),
+                ])]),
             },
             Page {
                 id: "security",

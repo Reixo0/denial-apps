@@ -105,6 +105,8 @@ pub static CHINESE: &[(&str, &str)] = &[
     ("Frost", "磨砂"),
     ("How much glass blurs", "玻璃的模糊程度"),
     ("Blur quality", "模糊质量"),
+    ("Blur strength", "模糊强度"),
+    ("Everything that blurs", "所有模糊效果"),
     ("Low", "低"),
     ("Medium", "中"),
     ("High", "高"),
