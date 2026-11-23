@@ -81,6 +81,10 @@ enum Screen {
     Wallpapers,
     /// The wallpapers to pick from for the monitor beside the phone.
     MonitorWallpapers,
+    /// The files to pick a wallpaper from, for the phone or the monitor.
+    WallpaperFiles {
+        monitor: bool,
+    },
     /// The fingers that unlock the phone.
     Fingers,
     /// The time zones to pick from.
@@ -103,6 +107,9 @@ impl PartialEq for Screen {
             | (Screen::Fingers, Screen::Fingers)
             | (Screen::Zones, Screen::Zones)
             | (Screen::LightEffects, Screen::LightEffects) => true,
+            (Screen::WallpaperFiles { monitor: a }, Screen::WallpaperFiles { monitor: b }) => {
+                a == b
+            }
             (Screen::Page(a), Screen::Page(b)) => std::ptr::eq(*a, *b),
             (Screen::Network { id: a, .. }, Screen::Network { id: b, .. }) => a == b,
             (Screen::Device { path: a }, Screen::Device { path: b }) => a == b,
@@ -123,6 +130,7 @@ impl Screen {
             Screen::Device { .. } => "device",
             Screen::Wallpapers => "wallpapers",
             Screen::MonitorWallpapers => "monitor-wallpapers",
+            Screen::WallpaperFiles { .. } => "wallpaper-files",
             Screen::Fingers => "fingers",
             Screen::Zones => "zones",
             Screen::AndroidApp { .. } => "android-app",
@@ -454,9 +462,13 @@ struct Wallpapers {
     online: wallpapers::Online,
     /// Where the shown wallpaper sits, as the sliders have it.
     placement: wallpaper::Placement,
-    /// The screen they are for: the monitor by its connector, or None for
-    /// the phone.
-    output: Option<String>,
+    /// What they are for: the home screen, the lock screen or the monitor.
+    target: wallpaper::Target,
+    /// The lock screen's own wallpaper; None while it shows the home
+    /// screen's.
+    lock: Option<String>,
+    /// The folder a file is picked from.
+    files: wallpapers::Files,
     /// What the monitor shows, for its page's row.
     monitor: Option<String>,
     /// The shown wallpaper whole, for the placement preview: its resource,
@@ -808,7 +820,8 @@ impl Settings {
             storage: Storage::default(),
             installed: Installed::default(),
             wallpapers: Wallpapers {
-                current: wallpaper::current(None),
+                current: wallpaper::current(&wallpaper::Target::Home),
+                lock: wallpaper::own_lock(),
                 ..Wallpapers::default()
             },
             _display: cx.spawn(async move |this, cx| Self::follow_display(this, cx).await),
@@ -1042,18 +1055,31 @@ impl Settings {
             self.read_about(cx);
         }
         if self.screen.is_page("style") {
-            self.wallpapers.current = wallpaper::current(None);
+            self.wallpapers.current = wallpaper::current(&wallpaper::Target::Home);
+            self.wallpapers.lock = wallpaper::own_lock();
         }
         if self.screen.is_page("monitor") {
             self.read_monitor_wallpaper();
             self.read_densities(cx);
         }
         match self.screen {
-            Screen::Wallpapers => self.read_wallpapers(None, cx),
-            Screen::MonitorWallpapers => {
-                let output = self.monitor.as_ref().map(|monitor| monitor.name.clone());
-                self.read_wallpapers(output, cx)
+            Screen::Wallpapers => {
+                let target = match self.wallpapers.target {
+                    wallpaper::Target::Lock => wallpaper::Target::Lock,
+                    _ => wallpaper::Target::Home,
+                };
+                self.read_wallpapers(target, cx)
             }
+            Screen::MonitorWallpapers => {
+                let target = self
+                    .monitor
+                    .as_ref()
+                    .map_or(wallpaper::Target::Home, |monitor| {
+                        wallpaper::Target::Output(monitor.name.clone())
+                    });
+                self.read_wallpapers(target, cx)
+            }
+            Screen::WallpaperFiles { .. } => self.read_files(None, cx),
             _ => {}
         }
         if self.screen == Screen::Fingers {
@@ -1172,6 +1198,8 @@ impl Settings {
             Screen::MonitorWallpapers => {
                 catalog::page("monitor").map_or(Screen::Home, Screen::Page)
             }
+            Screen::WallpaperFiles { monitor: true } => Screen::MonitorWallpapers,
+            Screen::WallpaperFiles { monitor: false } => Screen::Wallpapers,
             Screen::Fingers => catalog::page("security").map_or(Screen::Home, Screen::Page),
             Screen::Zones => catalog::page("time").map_or(Screen::Home, Screen::Page),
             Screen::LightEffects => catalog::page("lights").map_or(Screen::Home, Screen::Page),
@@ -1373,6 +1401,7 @@ impl Settings {
             Screen::Wallpapers | Screen::MonitorWallpapers => {
                 self.wallpapers_screen(width, layer, cx)
             }
+            Screen::WallpaperFiles { .. } => self.files_screen(width, layer, cx),
             Screen::Fingers => self.fingers_screen(layer, cx),
             Screen::Zones => self.zones_screen(layer, cx),
             Screen::AndroidApp { package } => self.android_app_screen(package, layer, cx),
@@ -1518,6 +1547,7 @@ impl Settings {
                 .unwrap_or_default(),
             Screen::Wallpapers => "Wallpaper".into(),
             Screen::MonitorWallpapers => "Monitor wallpaper".into(),
+            Screen::WallpaperFiles { .. } => "Pick a file".into(),
             Screen::Fingers => "Fingerprint".into(),
             Screen::Zones => "Time zone".into(),
             Screen::AndroidApp { package } => self

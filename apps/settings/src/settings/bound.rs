@@ -110,14 +110,16 @@ impl Settings {
             }
             "language.system" => Some(self.language_picked()),
             "style.accent" => {
-                if self.kept("appearance.accentSource") != Some(&json!("custom")) {
-                    return Some(0);
+                match self.kept("appearance.accentSource").and_then(Value::as_str) {
+                    Some("custom") => {}
+                    Some("lockWallpaper") => return Some(1),
+                    _ => return Some(0),
                 }
                 let argb = self.kept("appearance.customAccentColor")?.as_u64()?;
                 ACCENTS
                     .iter()
                     .position(|&(_, accent)| u64::from(accent) == argb)
-                    .map(|ix| ix + 1)
+                    .map(|ix| ix + 2)
             }
             _ => None,
         }
@@ -136,13 +138,16 @@ impl Settings {
             };
         }
         if item.key == "style.wallpaper" {
-            return wallpaper::name(
+            let home = wallpaper::name(
                 self.wallpapers
                     .current
                     .as_deref()
                     .unwrap_or(wallpaper::DENIAL),
-            )
-            .into();
+            );
+            return match &self.wallpapers.lock {
+                Some(lock) => format!("{home} · {}", wallpaper::name(lock)).into(),
+                None => home.into(),
+            };
         }
         if item.key == "monitor.wallpaper" {
             return wallpaper::name(
@@ -273,7 +278,7 @@ impl Settings {
                 }
                 "language.system" => self.set_language(option, cx),
                 "style.accent" => {
-                    let accent = option.checked_sub(1).map(|ix| ACCENTS[ix].1);
+                    let accent = option.checked_sub(2).map(|ix| ACCENTS[ix].1);
                     self.change(
                         item.title,
                         move |document| match accent {
@@ -282,7 +287,8 @@ impl Settings {
                                 denial::put(document, "appearance.customAccentColor", json!(argb));
                             }
                             None => {
-                                denial::put(document, "appearance.accentSource", json!("wallpaper"))
+                                let source = ["wallpaper", "lockWallpaper"][option];
+                                denial::put(document, "appearance.accentSource", json!(source))
                             }
                         },
                         cx,

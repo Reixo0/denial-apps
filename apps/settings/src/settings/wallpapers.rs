@@ -20,9 +20,9 @@ use gpui::{
 };
 
 use super::parts::{Fill, ICON};
-use super::{Layer, Settings};
+use super::{Layer, Screen, Settings};
 use crate::wallhaven::{self, Found};
-use crate::wallpaper::{self, Choice, MAX_ZOOM, Placement};
+use crate::wallpaper::{self, Choice, Listing, MAX_ZOOM, Placement, Target};
 
 /// Pictures to a row, and the space between them, in dp.
 const COLUMNS: usize = 3;
@@ -58,6 +58,26 @@ pub(in crate::settings) struct Online {
     typing: Option<Task<()>>,
 }
 
+/// Pictures a folder shows at first, and more with each More.
+const FILES: usize = 30;
+
+/// The folder a wallpaper's file is picked from.
+#[derive(Default)]
+pub(in crate::settings) struct Files {
+    folder: PathBuf,
+    listing: Listing,
+    /// How many of the pictures are shown.
+    shown: usize,
+    /// Why the folder could not be read.
+    failed: Option<String>,
+    /// The picture being copied.
+    taking: Option<PathBuf>,
+    /// Reading the folder.
+    reading: Option<Task<()>>,
+    /// Making the shown pictures' thumbnails.
+    thumbs: Option<Task<()>>,
+}
+
 /// `tiles` three to a row.
 fn rows(tiles: Vec<Stateful<Div>>) -> Vec<Div> {
     let mut tiles = tiles.into_iter().peekable();
@@ -77,8 +97,8 @@ impl Settings {
     /// The screen the wallpapers are for, in pixels, wide by high: what
     /// Wallhaven's are at least, and the placement preview's shape.
     fn wallpaper_screen(&self) -> (u32, u32) {
-        match (&self.wallpapers.output, &self.monitor) {
-            (Some(_), Some(monitor)) => monitor.size,
+        match (&self.wallpapers.target, &self.monitor) {
+            (Target::Output(_), Some(monitor)) => monitor.size,
             _ => self.window_pixels,
         }
     }
@@ -94,11 +114,30 @@ impl Settings {
         let shown = &self.wallpapers;
         let live = layer.live();
         let mut parts = Vec::new();
+        let monitor = matches!(shown.target, Target::Output(_));
+        if !monitor {
+            parts.push(self.chip_row("Screens"));
+            parts.push(self.screens_island(live, cx));
+        }
         if shown.current.is_some() {
             parts.push(self.chip_row("Placement"));
             parts.push(self.placement_island(live, cx));
             parts.push(self.chip_row("Your pictures"));
         }
+        let file = self
+            .row(
+                "wallpaper.file",
+                Some(Icon::Photos),
+                "From a file",
+                None,
+                (true, true),
+            )
+            .child(self.chevron());
+        parts.push(
+            island(&self.look).child(self.live(file, live, cx, move |this, window, cx| {
+                this.open(Screen::WallpaperFiles { monitor }, window, cx)
+            })),
+        );
         if !shown.choices.is_empty() {
             let tiles = shown.choices.iter().map(|choice| {
                 let picked = shown.current.as_deref() == Some(choice.resource.as_str());
@@ -128,6 +167,291 @@ impl Settings {
         parts.push(self.chip_row("Wallhaven"));
         parts.push(self.wallhaven_island(width, live, cx));
         parts
+    }
+
+    /// Whether the lock screen has its own wallpaper and, when it does, which
+    /// of the two the rest of the screen changes.
+    fn screens_island(&self, live: bool, cx: &mut Context<Self>) -> Div {
+        let separate = self.wallpapers.lock.is_some();
+        let row = self
+            .row(
+                "wallpaper.separate",
+                Some(Icon::Lock),
+                "Separate lock screen wallpaper",
+                None,
+                (true, !separate),
+            )
+            .child(self.toggle(separate));
+        let mut island = island(&self.look).child(self.live(row, live, cx, move |this, _, cx| {
+            this.separate_lock(!separate, cx)
+        }));
+        if separate {
+            let picked = usize::from(self.wallpapers.target == Target::Lock);
+            island = island.child(self.separator(0.)).child(self.options_row(
+                "wallpaper.target",
+                "Changing",
+                None,
+                &["Home", "Lock"],
+                picked,
+                live,
+                (false, true),
+                cx,
+                Rc::new(|this: &mut Self, option, _, cx| {
+                    let target = [Target::Home, Target::Lock][option].clone();
+                    this.read_wallpapers(target, cx);
+                    cx.notify();
+                }),
+            ));
+        }
+        island
+    }
+
+    /// Gives the lock screen its own wallpaper, or the home screen's again.
+    fn separate_lock(&mut self, separate: bool, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let set = cx
+                .background_spawn(async move { wallpaper::set_separate(separate) })
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                if let Err(error) = set {
+                    view.note(
+                        fill(
+                            "Could not set the wallpaper: {why}",
+                            &[("why", &error.to_string())],
+                        ),
+                        cx,
+                    );
+                }
+                let target = if separate { Target::Lock } else { Target::Home };
+                view.read_wallpapers(target, cx);
+                if !separate {
+                    // The lock screen's depth follows the home picture.
+                    let file = view
+                        .wallpapers
+                        .current
+                        .as_deref()
+                        .and_then(|current| current.strip_prefix("file:"))
+                        .map(PathBuf::from);
+                    if let (true, Some(file)) = (view.lock_has_depth(), file) {
+                        wallpaper::make_depth(&file);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Whether the lock screen draws a wallpaper with depth: the user may
+    /// have told it otherwise.
+    fn lock_has_depth(&self) -> bool {
+        self.denial.document.as_ref().is_none_or(|document| {
+            crate::denial::at(document, "lockScreen.useSystemWallpaper") != false
+        }) && wallpaper::depth_installed()
+    }
+
+    /// The folder shown, its folders, and its pictures to pick from.
+    pub(super) fn files_screen(
+        &self,
+        width: f32,
+        layer: Layer,
+        cx: &mut Context<Self>,
+    ) -> Vec<Div> {
+        let files = &self.wallpapers.files;
+        let live = layer.live() && files.taking.is_none();
+        let mut parts = vec![self.chip_row(files.folder.display().to_string())];
+        let mut folders: Vec<(String, SharedString, PathBuf)> = Vec::new();
+        if let Some(parent) = files.folder.parent() {
+            folders.push(("..".to_owned(), "Up one folder".into(), parent.to_owned()));
+        }
+        folders.extend(files.listing.folders.iter().map(|folder| {
+            let name = folder
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            (folder.display().to_string(), name.into(), folder.clone())
+        }));
+        let count = folders.len();
+        let mut list = island(&self.look);
+        for (ix, (id, name, folder)) in folders.into_iter().enumerate() {
+            let row = self
+                .row(
+                    SharedString::from(id),
+                    None,
+                    name,
+                    None,
+                    (ix == 0, ix + 1 == count),
+                )
+                .child(self.chevron());
+            list = list
+                .when(ix > 0, |list| list.child(self.separator(0.)))
+                .child(self.live(row, live, cx, move |this, _, cx| {
+                    this.read_files(Some(folder.clone()), cx)
+                }));
+        }
+        if count > 0 {
+            parts.push(list);
+        }
+        let tiles: Vec<Stateful<Div>> = files
+            .listing
+            .pictures
+            .iter()
+            .take(files.shown)
+            .map(|file| {
+                let resource = format!("file:{}", file.display());
+                let name = wallpaper::name(&resource);
+                let thumb = self.wallpapers.thumbs.get(&resource);
+                let taking = files.taking.as_ref() == Some(file);
+                let tile = self.wallpaper_tile(resource, thumb, &name, taking, width);
+                let file = file.clone();
+                self.live(tile, live, cx, move |this, window, cx| {
+                    this.take_file(file.clone(), window, cx)
+                })
+            })
+            .collect();
+        let status = if let Some(why) = &files.failed {
+            Some(self.note_line(why.clone()))
+        } else if tiles.is_empty() && files.reading.is_some() {
+            Some(self.note_line("Looking…"))
+        } else if tiles.is_empty() {
+            Some(self.note_line("Nothing found"))
+        } else if files.shown < files.listing.pictures.len() {
+            Some(self.buttons([self.button(
+                "files-more",
+                "More",
+                Fill::Control,
+                live,
+                cx,
+                |this, _, cx| {
+                    this.wallpapers.files.shown += FILES;
+                    this.read_file_thumbs(cx);
+                    cx.notify();
+                },
+            )]))
+        } else {
+            None
+        };
+        parts.push(
+            island(&self.look)
+                .p(dp(PAD))
+                .flex()
+                .flex_col()
+                .gap(dp(GAP))
+                .children(rows(tiles))
+                .children(status),
+        );
+        parts
+    }
+
+    /// Lists `folder`, or the one shown last again, then makes its pictures'
+    /// thumbnails.
+    pub(super) fn read_files(&mut self, folder: Option<PathBuf>, cx: &mut Context<Self>) {
+        let files = &mut self.wallpapers.files;
+        let known = !files.folder.as_os_str().is_empty();
+        let folder = match folder {
+            Some(folder) => folder,
+            None if known => files.folder.clone(),
+            None => wallpaper::pictures_folder(),
+        };
+        files.folder = folder.clone();
+        files.listing = Listing::default();
+        files.shown = FILES;
+        files.failed = None;
+        cx.notify();
+        files.reading = Some(cx.spawn(async move |this, cx| {
+            let listed = cx
+                .background_spawn(async move { wallpaper::list(&folder) })
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                match listed {
+                    Ok(listing) => view.wallpapers.files.listing = listing,
+                    Err(error) => view.wallpapers.files.failed = Some(error.to_string()),
+                }
+                view.read_file_thumbs(cx);
+                cx.notify();
+            });
+        }));
+    }
+
+    /// Makes the shown pictures' thumbnails one by one.
+    fn read_file_thumbs(&mut self, cx: &mut Context<Self>) {
+        let shown = &self.wallpapers;
+        let wanted: Vec<PathBuf> = shown
+            .files
+            .listing
+            .pictures
+            .iter()
+            .take(shown.files.shown)
+            .filter(|file| {
+                !shown
+                    .thumbs
+                    .contains_key(&format!("file:{}", file.display()))
+            })
+            .cloned()
+            .collect();
+        let making = cx.spawn(async move |this, cx| {
+            for file in wanted {
+                let resource = format!("file:{}", file.display());
+                let thumb = cx
+                    .background_spawn(async move { wallpaper::thumbnail(&file) })
+                    .await;
+                let taken = this.update(cx, |view, cx| {
+                    if let Some(thumb) = thumb {
+                        view.wallpapers.thumbs.insert(resource, thumb);
+                        cx.notify();
+                    }
+                });
+                if taken.is_err() {
+                    return;
+                }
+            }
+        });
+        self.wallpapers.files.reading = None;
+        self.wallpapers.files.thumbs = Some(making);
+    }
+
+    /// Copies `file` into the wallpaper folder, shows it, and goes back.
+    fn take_file(&mut self, file: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let monitor = matches!(self.wallpapers.target, Target::Output(_));
+        self.wallpapers.files.taking = Some(file.clone());
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            let taken = cx
+                .background_spawn(async move { wallpaper::import(&file) })
+                .await;
+            let _ = this.update_in(cx, |view, window, cx| {
+                view.wallpapers.files.taking = None;
+                match taken {
+                    Ok(file) => {
+                        let resource = format!("file:{}", file.display());
+                        let choice = Choice {
+                            name: wallpaper::name(&resource),
+                            resource,
+                            file: Some(file),
+                        };
+                        let target = view.wallpapers.target.clone();
+                        view.set_wallpaper(&choice, cx);
+                        // Listed afresh with it, the choice shown meanwhile.
+                        view.wallpapers.reading = None;
+                        if view.screen == (Screen::WallpaperFiles { monitor }) {
+                            let back = Self::parent(&view.screen);
+                            view.open_at(back, true, window, cx);
+                        } else {
+                            view.read_wallpapers(target, cx);
+                        }
+                        view.wallpapers.current = Some(choice.resource);
+                        view.wallpapers.placement = Placement::default();
+                        view.read_preview(cx);
+                    }
+                    Err(why) => view.note(
+                        fill("Could not set the wallpaper: {why}", &[("why", &why)]),
+                        cx,
+                    ),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// The shown wallpaper in a small screen, placed as the sliders under
@@ -241,16 +565,15 @@ impl Settings {
     /// Writes the placement the sliders have into the shell's file.
     fn place_wallpaper(&mut self, cx: &mut Context<Self>) {
         let placement = self.wallpapers.placement;
-        let output = self.wallpapers.output.clone();
+        let target = self.wallpapers.target.clone();
         cx.notify();
         cx.spawn(async move |this, cx| {
             let placed = cx
-                .background_spawn(async move { wallpaper::place(placement, output.as_deref()) })
+                .background_spawn(async move { wallpaper::place(placement, &target) })
                 .await;
             if let Err(error) = placed {
                 let _ = this.update(cx, |view, cx| {
-                    view.wallpapers.placement =
-                        wallpaper::placement(view.wallpapers.output.as_deref());
+                    view.wallpapers.placement = wallpaper::placement(&view.wallpapers.target);
                     view.note(
                         fill(
                             "Could not place the wallpaper: {why}",
@@ -457,13 +780,23 @@ impl Settings {
 
     /// Lists the pictures, then makes their thumbnails one by one, showing
     /// each as it comes; Wallhaven's first page comes meanwhile.
-    /// `output` is the monitor they are for, None for the phone; Wallhaven
-    /// is asked afresh when it changes, for that screen's size.
-    pub(super) fn read_wallpapers(&mut self, output: Option<String>, cx: &mut Context<Self>) {
-        let moved = self.wallpapers.output != output;
-        self.wallpapers.current = wallpaper::current(output.as_deref());
-        self.wallpapers.placement = wallpaper::placement(output.as_deref());
-        self.wallpapers.output = output;
+    /// `target` is what they are for; Wallhaven is asked afresh when that
+    /// moves between the phone and a monitor, for the screen's size.
+    pub(super) fn read_wallpapers(&mut self, target: Target, cx: &mut Context<Self>) {
+        self.wallpapers.lock = wallpaper::own_lock();
+        let target = match target {
+            Target::Lock if self.wallpapers.lock.is_none() => Target::Home,
+            target => target,
+        };
+        let output = |target: &Target| match target {
+            Target::Output(name) => Some(name.clone()),
+            _ => None,
+        };
+        let moved = output(&self.wallpapers.target) != output(&target);
+        self.wallpapers.current = wallpaper::current(&target);
+        self.wallpapers.placement = wallpaper::placement(&target);
+        self.wallpapers.target = target;
+        self.read_preview(cx);
         let online = &self.wallpapers.online;
         if moved || online.reading.is_none() && (online.asked.is_none() || online.failed.is_some())
         {
@@ -675,8 +1008,8 @@ impl Settings {
                         view.set_wallpaper(&choice, cx);
                         // It is one of yours now: list the folder again.
                         view.wallpapers.reading = None;
-                        let output = view.wallpapers.output.clone();
-                        view.read_wallpapers(output, cx);
+                        let target = view.wallpapers.target.clone();
+                        view.read_wallpapers(target, cx);
                     }
                     Err(why) => view.note(
                         fill("Could not download the wallpaper: {why}", &[("why", &why)]),
@@ -689,18 +1022,21 @@ impl Settings {
         .detach();
     }
 
-    /// Shows `choice` on the phone, and on every screen without its own,
-    /// and gives the lock screen its depth; or on the monitor alone.
+    /// Shows `choice` on what the screen changes, and gives the lock screen
+    /// its depth when it shows there.
     fn set_wallpaper(&mut self, choice: &Choice, cx: &mut Context<Self>) {
         let choice = choice.clone();
-        let output = self.wallpapers.output.clone();
-        // The lock screen draws the home wallpaper, with depth, unless the
-        // user told it otherwise.
-        let depth = output.is_none()
-            && self.denial.document.as_ref().is_none_or(|document| {
-                crate::denial::at(document, "lockScreen.useSystemWallpaper") != false
-            })
-            && wallpaper::depth_installed();
+        let target = self.wallpapers.target.clone();
+        // The lock screen draws its own wallpaper, else the home screen's.
+        let on_lock = match target {
+            Target::Home => self.wallpapers.lock.is_none(),
+            Target::Lock => true,
+            Target::Output(_) => false,
+        };
+        let depth = on_lock && self.lock_has_depth();
+        if target == Target::Lock {
+            self.wallpapers.lock = Some(choice.resource.clone());
+        }
         self.wallpapers.current = Some(choice.resource.clone());
         self.wallpapers.placement = Placement::default();
         self.read_preview(cx);
@@ -708,7 +1044,7 @@ impl Settings {
         cx.spawn(async move |this, cx| {
             let set = cx
                 .background_spawn(async move {
-                    wallpaper::set(&choice, output.as_deref())?;
+                    wallpaper::set(&choice, &target)?;
                     if let (true, Some(file)) = (depth, choice.file.as_ref()) {
                         wallpaper::make_depth(file);
                     }
@@ -718,7 +1054,7 @@ impl Settings {
             let _ = this.update(cx, |view, cx| match set {
                 Ok(()) => view.note("Wallpaper set", cx),
                 Err(error) => {
-                    view.wallpapers.current = wallpaper::current(view.wallpapers.output.as_deref());
+                    view.wallpapers.current = wallpaper::current(&view.wallpapers.target);
                     view.note(
                         fill(
                             "Could not set the wallpaper: {why}",

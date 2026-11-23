@@ -41,8 +41,9 @@ impl Settings {
                 }
                 catalog::set_monitor(monitor.is_some());
                 view.monitor = monitor;
-                let on_monitor =
-                    view.screen.is_page("monitor") || view.screen == Screen::MonitorWallpapers;
+                let on_monitor = view.screen.is_page("monitor")
+                    || view.screen == Screen::MonitorWallpapers
+                    || view.screen == Screen::WallpaperFiles { monitor: true };
                 if view.monitor.is_none() && on_monitor {
                     view.open_at(Screen::Home, true, window, cx);
                 }
@@ -85,7 +86,8 @@ impl Settings {
 
     pub(super) fn read_monitor_wallpaper(&mut self) {
         let output = self.monitor.as_ref().map(|monitor| monitor.name.as_str());
-        self.wallpapers.monitor = output.and_then(|name| wallpaper::current(Some(name)));
+        self.wallpapers.monitor =
+            output.and_then(|name| wallpaper::current(&wallpaper::Target::Output(name.to_owned())));
     }
 
     /// The Monitor page's islands: the scale and refresh rate, then its

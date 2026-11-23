@@ -63,6 +63,18 @@ impl Placement {
     }
 }
 
+/// What a wallpaper is for.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum Target {
+    /// The phone's home screen, and its lock screen unless that has its own.
+    #[default]
+    Home,
+    /// The lock screen's own.
+    Lock,
+    /// The monitor of that name.
+    Output(String),
+}
+
 /// A wallpaper to pick: how the shell names it, and a picture of it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Choice {
@@ -95,24 +107,43 @@ fn read_state() -> Option<Value> {
     serde_json::from_slice(&std::fs::read(state_file()?).ok()?).ok()
 }
 
-/// The wallpaper the phone shows, or the monitor named `output`, as the
-/// shell names it.
-pub fn current(output: Option<&str>) -> Option<String> {
+/// The wallpaper `target` shows, as the shell names it.
+pub fn current(target: &Target) -> Option<String> {
     let state = read_state()?;
-    output
-        .and_then(|name| state["outputs"][name].as_str())
-        .or_else(|| state["all"].as_str())
+    let own = match target {
+        Target::Home => None,
+        Target::Lock => state["lock"]["resource"].as_str(),
+        Target::Output(name) => state["outputs"][name].as_str(),
+    };
+    own.or_else(|| state["all"].as_str()).map(str::to_owned)
+}
+
+/// The lock screen's own wallpaper; None while it shows the home screen's.
+pub fn own_lock() -> Option<String> {
+    read_state()?["lock"]["resource"]
+        .as_str()
         .map(str::to_owned)
 }
 
-/// Where the wallpaper sits on the phone, or on the monitor named
-/// `output`, as the shell's file says.
-pub fn placement(output: Option<&str>) -> Placement {
-    let Some(state) = read_state() else {
-        return Placement::default();
-    };
+/// Where the wallpaper sits on `target`, as the shell's file says.
+pub fn placement(target: &Target) -> Placement {
+    read_state().map_or_else(Placement::default, |state| placement_in(&state, target))
+}
+
+fn placement_in(state: &Value, target: &Target) -> Placement {
     let number = |value: &Value| value.as_f64().filter(|n| n.is_finite()).map(|n| n as f32);
-    let own = |key: &str| output.map_or(&Value::Null, |name| &state[key][name]);
+    if *target == Target::Lock && state["lock"].is_object() {
+        let lock = &state["lock"];
+        return Placement {
+            x: number(&lock["alignmentX"]).unwrap_or(0.0).clamp(-1.0, 1.0),
+            y: number(&lock["alignmentY"]).unwrap_or(0.0).clamp(-1.0, 1.0),
+            zoom: number(&lock["zoom"]).unwrap_or(1.0).clamp(1.0, MAX_ZOOM),
+        };
+    }
+    let own = |key: &str| match target {
+        Target::Output(name) => &state[key][name],
+        _ => &Value::Null,
+    };
     Placement {
         x: number(&own("outputAlignments")["x"])
             .or_else(|| number(&state["alignmentX"]))
@@ -149,6 +180,121 @@ pub fn folder() -> Option<PathBuf> {
         .or_else(|| home().map(|home| home.join("Pictures/Wallpapers")))
 }
 
+/// Whether `path` is named like a picture the shell can show.
+fn is_picture(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "jpg" | "jpeg" | "png" | "webp"
+            )
+        })
+}
+
+/// What a folder holds for picking a file: its folders by name, and its
+/// pictures, the newest first.
+#[derive(Clone, Debug, Default)]
+pub struct Listing {
+    pub folders: Vec<PathBuf>,
+    pub pictures: Vec<PathBuf>,
+}
+
+/// Where picking a file starts: the pictures folder, else home.
+pub fn pictures_folder() -> PathBuf {
+    let home = home().unwrap_or_else(|| PathBuf::from("/"));
+    let pictures = home.join("Pictures");
+    if pictures.is_dir() { pictures } else { home }
+}
+
+/// The folders and pictures in `folder`, hidden ones left out.
+pub fn list(folder: &Path) -> std::io::Result<Listing> {
+    let mut listing = Listing::default();
+    let mut pictures = Vec::new();
+    for entry in std::fs::read_dir(folder)?.flatten() {
+        if entry.file_name().to_string_lossy().starts_with('.') {
+            continue;
+        }
+        let path = entry.path();
+        // Through links, as the files are read.
+        let Ok(metadata) = std::fs::metadata(&path) else {
+            continue;
+        };
+        if metadata.is_dir() {
+            listing.folders.push(path);
+        } else if metadata.is_file() && is_picture(&path) {
+            pictures.push((metadata.modified().ok(), path));
+        }
+    }
+    listing
+        .folders
+        .sort_by_key(|path| path.to_string_lossy().to_lowercase());
+    pictures.sort_by(|a, b| b.cmp(a));
+    listing.pictures = pictures.into_iter().map(|(_, path)| path).collect();
+    Ok(listing)
+}
+
+/// Copies `file` into the wallpaper folder, turned upright, so it stays when
+/// the original goes. A picture already there is taken as it is.
+pub fn import(file: &Path) -> Result<PathBuf, String> {
+    use image::metadata::Orientation;
+
+    let why = |error: std::io::Error| error.to_string();
+    let folder = folder().ok_or("no wallpaper folder")?;
+    let (picture, orientation) = decode_as_kept(file).ok_or("the picture could not be read")?;
+    if file.parent() == Some(folder.as_path()) {
+        return Ok(file.to_owned());
+    }
+    std::fs::create_dir_all(&folder).map_err(why)?;
+    let turned = orientation != Orientation::NoTransforms;
+    let stem = file
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let extension = if turned {
+        "jpg".to_owned()
+    } else {
+        file.extension()
+            .map(|extension| extension.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    };
+    let bytes = if turned {
+        let mut picture = picture;
+        picture.apply_orientation(orientation);
+        let mut bytes = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 95)
+            .encode_image(&picture.into_rgb8())
+            .map_err(|error| error.to_string())?;
+        bytes
+    } else {
+        std::fs::read(file).map_err(why)?
+    };
+    let mut copy = 1;
+    let to = loop {
+        let name = match copy {
+            1 => format!("{stem}.{extension}"),
+            copy => format!("{stem}-{copy}.{extension}"),
+        };
+        let to = folder.join(name);
+        match std::fs::read(&to) {
+            // Picked before.
+            Ok(there) if there == bytes => return Ok(to),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break to,
+            _ => copy += 1,
+        }
+    };
+    let temporary = folder.join(format!(".{stem}.new"));
+    let written = std::fs::File::create(&temporary).and_then(|mut out| {
+        std::io::Write::write_all(&mut out, &bytes)?;
+        out.sync_all()
+    });
+    if let Err(error) = written.and_then(|()| std::fs::rename(&temporary, &to)) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(why(error));
+    }
+    Ok(to)
+}
+
 /// Denial's own wallpaper and the pictures in the wallpaper folder.
 pub fn choices() -> Vec<Choice> {
     let mut files: Vec<PathBuf> = folder()
@@ -157,16 +303,7 @@ pub fn choices() -> Vec<Choice> {
         .flatten()
         .flatten()
         .map(|entry| entry.path())
-        .filter(|path| {
-            path.extension()
-                .and_then(|extension| extension.to_str())
-                .is_some_and(|extension| {
-                    matches!(
-                        extension.to_ascii_lowercase().as_str(),
-                        "jpg" | "jpeg" | "png" | "webp"
-                    )
-                })
-        })
+        .filter(|path| is_picture(path))
         .collect();
     files.sort();
     let denial = Choice {
@@ -203,19 +340,20 @@ fn denial_file() -> Option<PathBuf> {
         .find(|file| file.is_file())
 }
 
-/// Makes the phone show `choice`, or the monitor named `output`, placed
-/// afresh: the shell's file is rewritten beside itself and renamed over,
-/// keeping its version and dimming. The phone's picture goes on every
-/// screen without one of its own; monitors keep theirs.
-pub fn set(choice: &Choice, output: Option<&str>) -> std::io::Result<()> {
+/// Makes `target` show `choice`, placed afresh: the shell's file is
+/// rewritten beside itself and renamed over, keeping its version and
+/// dimming. The home screen's picture goes on every screen without one of
+/// its own; monitors keep theirs, and so does a lock screen with its own.
+pub fn set(choice: &Choice, target: &Target) -> std::io::Result<()> {
     let path = state_file().ok_or(std::io::ErrorKind::NotFound)?;
-    let mut state = read_file(&path).unwrap_or_else(|| json!({"version": 5}));
-    match output {
-        Some(name) => {
+    let mut state = read_file(&path).unwrap_or_else(|| json!({"version": 5, "all": DENIAL}));
+    match target {
+        Target::Output(name) => {
             entry(&mut state, "outputs", name, json!(choice.resource));
             write_own_placement(&mut state, name, Placement::default());
         }
-        None => {
+        Target::Lock => write_lock(&mut state, &choice.resource, Placement::default()),
+        Target::Home => {
             state["all"] = json!(choice.resource);
             forget_built_in(&mut state, "outputs");
             write_placement(&mut state, Placement::default());
@@ -224,13 +362,49 @@ pub fn set(choice: &Choice, output: Option<&str>) -> std::io::Result<()> {
     write_state(&path, &state)
 }
 
-/// Places the wallpaper on the phone, or on the monitor named `output`.
-pub fn place(placement: Placement, output: Option<&str>) -> std::io::Result<()> {
+/// Gives the lock screen its own wallpaper, at first the home screen's as it
+/// sits, or makes it follow the home screen again.
+pub fn set_separate(separate: bool) -> std::io::Result<()> {
     let path = state_file().ok_or(std::io::ErrorKind::NotFound)?;
     let mut state = read_file(&path).unwrap_or_else(|| json!({"version": 5, "all": DENIAL}));
-    match output {
-        Some(name) => write_own_placement(&mut state, name, placement),
-        None => write_placement(&mut state, placement),
+    separate_in(&mut state, separate);
+    write_state(&path, &state)
+}
+
+fn separate_in(state: &mut Value, separate: bool) {
+    if separate {
+        let resource = state["all"].as_str().unwrap_or(DENIAL).to_owned();
+        let placement = placement_in(state, &Target::Home);
+        write_lock(state, &resource, placement);
+    } else if let Some(map) = state.as_object_mut() {
+        map.remove("lock");
+    }
+}
+
+fn write_lock(state: &mut Value, resource: &str, placement: Placement) {
+    state["lock"] = json!({
+        "resource": resource,
+        "alignmentX": placement.x,
+        "alignmentY": placement.y,
+        "zoom": placement.zoom,
+    });
+}
+
+/// Places the wallpaper on `target`.
+pub fn place(placement: Placement, target: &Target) -> std::io::Result<()> {
+    let path = state_file().ok_or(std::io::ErrorKind::NotFound)?;
+    let mut state = read_file(&path).unwrap_or_else(|| json!({"version": 5, "all": DENIAL}));
+    match target {
+        Target::Output(name) => write_own_placement(&mut state, name, placement),
+        Target::Lock => {
+            let resource = state["lock"]["resource"]
+                .as_str()
+                .or_else(|| state["all"].as_str())
+                .unwrap_or(DENIAL)
+                .to_owned();
+            write_lock(&mut state, &resource, placement);
+        }
+        Target::Home => write_placement(&mut state, placement),
     }
     write_state(&path, &state)
 }
@@ -329,12 +503,26 @@ fn cached(file: &Path, kind: &str) -> Option<PathBuf> {
     Some(cache()?.join(format!("{:016x}{kind}.jpg", hasher.finish())))
 }
 
+/// `file`'s picture, upright.
 fn decode(file: &Path) -> Option<image::DynamicImage> {
-    image::ImageReader::open(file)
-        .ok()?
-        .with_guessed_format()
-        .ok()?
-        .decode()
+    let (mut picture, orientation) = decode_as_kept(file)?;
+    picture.apply_orientation(orientation);
+    Some(picture)
+}
+
+/// `file`'s picture as its pixels lie, and the turn that puts it upright,
+/// which cameras write beside them.
+fn decode_as_kept(file: &Path) -> Option<(image::DynamicImage, image::metadata::Orientation)> {
+    use image::ImageDecoder;
+
+    let read = || -> image::ImageResult<_> {
+        let mut decoder = image::ImageReader::open(file)?
+            .with_guessed_format()?
+            .into_decoder()?;
+        let orientation = decoder.orientation()?;
+        Ok((image::DynamicImage::from_decoder(decoder)?, orientation))
+    };
+    read()
         .map_err(|error| eprintln!("settings: reading {}: {error}", file.display()))
         .ok()
 }
@@ -443,6 +631,22 @@ mod tests {
         );
         assert_eq!(state["outputZooms"]["DP-1"], json!(2.0));
         assert_eq!(state["alignmentX"], json!(0.0));
+    }
+
+    #[test]
+    fn the_lock_screen_starts_as_the_home_screen() {
+        let mut state = json!({"all": "file:/a.png", "alignmentX": 0.5, "zoom": 2.0});
+        separate_in(&mut state, true);
+        assert_eq!(
+            state["lock"],
+            json!({"resource": "file:/a.png", "alignmentX": 0.5, "alignmentY": 0.0, "zoom": 2.0})
+        );
+        write_placement(&mut state, Placement::default());
+        assert_eq!(placement_in(&state, &Target::Lock).x, 0.5);
+        assert_eq!(placement_in(&state, &Target::Home).x, 0.0);
+        separate_in(&mut state, false);
+        assert!(state.get("lock").is_none());
+        assert_eq!(placement_in(&state, &Target::Lock).x, 0.0);
     }
 
     #[test]

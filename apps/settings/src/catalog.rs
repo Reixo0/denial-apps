@@ -436,7 +436,8 @@ pub static GROUPS: &[Group] = &[
                             "Accent colour",
                             Kind::Choice(
                                 &[
-                                    "From wallpaper",
+                                    "From home wallpaper",
+                                    "From lock wallpaper",
                                     "Lavender",
                                     "Blue",
                                     "Teal",
@@ -896,7 +897,7 @@ mod tests {
             _ => panic!("{key}"),
         };
         let accents: Vec<&str> = ACCENTS.iter().map(|(name, _)| *name).collect();
-        assert_eq!(options("style.accent")[1..], accents[..]);
+        assert_eq!(options("style.accent")[2..], accents[..]);
         let delays: Vec<&str> = LOCK_DELAYS.iter().map(|(name, _)| *name).collect();
         assert_eq!(options("security.after")[..delays.len()], delays[..]);
         assert_eq!(options("security.after")[delays.len()..], ["Never"]);
