@@ -487,10 +487,17 @@ fn follow(calls: Vec<Call>, ringing: &mut Option<Arc<AtomicBool>>) {
         (true, false) => {
             open_calls();
             let stop = Arc::new(AtomicBool::new(false));
-            let flag = stop.clone();
-            std::thread::spawn(move || ring(&flag));
-            let flag = stop.clone();
-            std::thread::spawn(move || vibrate(&flag));
+            // Android's ringer mode, set in Denial's volume dialog: silent
+            // neither rings nor vibrates, vibrate only vibrates.
+            let mode = ringer_mode();
+            if mode == "normal" {
+                let flag = stop.clone();
+                std::thread::spawn(move || ring(&flag));
+            }
+            if mode != "silent" {
+                let flag = stop.clone();
+                std::thread::spawn(move || vibrate(&flag));
+            }
             *ringing = Some(stop);
         }
         (false, true) => {
@@ -504,6 +511,31 @@ fn follow(calls: Vec<Call>, ringing: &mut Option<Arc<AtomicBool>>) {
 
 /// Plays the ringtone over and over until told to stop, as the Ringtone role
 /// so that it follows the ringtone volume rather than the media one.
+/// `sound.ringerMode` from Denial's settings: "normal", "vibrate" or
+/// "silent"; "normal" when it cannot be read. Only this one key is needed,
+/// so it is looked up in the text rather than parsed.
+fn ringer_mode() -> String {
+    let path = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| std::path::Path::new(&home).join(".config"))
+        })
+        .map(|config| config.join("denial/settings.json"));
+    let text = path
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .unwrap_or_default();
+    let key = "\"ringerMode\"";
+    let value = text.find(key).and_then(|at| {
+        let rest = text[at + key.len()..].trim_start();
+        let rest = rest.strip_prefix(':')?.trim_start().strip_prefix('"')?;
+        Some(rest[..rest.find('"')?].to_owned())
+    });
+    match value.as_deref() {
+        Some(mode @ ("vibrate" | "silent")) => mode.to_owned(),
+        _ => "normal".to_owned(),
+    }
+}
+
 fn ring(stop: &AtomicBool) {
     while !stop.load(Ordering::Relaxed) {
         let mut player = match Command::new("pw-play")
